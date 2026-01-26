@@ -1,6 +1,6 @@
 # Disclaude 🤖
 
-A multi-platform agent bot that connects to Claude Agent SDK - supporting Discord or Feishu/Lark (one at a time).
+A multi-platform agent bot that connects to Claude Agent SDK - supporting Discord or Feishu/Lark (one at a time). Written in TypeScript.
 
 ## Features
 
@@ -16,8 +16,8 @@ Choose ONE platform at a time via `PLATFORM` environment variable:
 
 | Platform | Status | Commands | Mention |
 |----------|--------|----------|---------|
-| Discord | ✅ | `!ask`, `!reset`, `!ping`, `!info` | `@BotName` |
-| Feishu/Lark | ✅ | `/ask`, `/reset`, `/status`, `/help` | Direct message |
+| Discord | ✅ | `/ask`, `/reset`, `/ping`, `/info` | `@BotName` |
+| Feishu/Lark | ✅ | `/reset`, `/status`, `/help` | Direct message |
 
 ## Supported Models
 
@@ -30,9 +30,7 @@ Choose ONE platform at a time via `PLATFORM` environment variable:
 
 ```bash
 cd disclaude
-python3 -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
+npm install
 ```
 
 ### 2. Configure
@@ -62,25 +60,19 @@ GLM_API_BASE_URL=https://open.bigmodel.cn/api/anthropic
 
 # Agent workspace
 AGENT_WORKSPACE=./workspace
-SESSION_PERSISTENCE_PATH=./sessions.json
 ```
 
 ### 3. Run
 
-**Option 1: Use system virtual environment**
+**Development mode (with auto-reload):**
 ```bash
-source venv/bin/activate
-python main.py
+npm run dev
 ```
 
-**Option 2: Use Falcon conda environment (recommended)**
+**Production mode:**
 ```bash
-./run_falcon.sh
-```
-
-Or manually:
-```bash
-/Users/hs3180/anaconda/anaconda3/bin/conda run -n falcon python main.py
+npm run build
+npm start
 ```
 
 ## Platform Setup
@@ -98,7 +90,7 @@ Or manually:
 1. Go to [Feishu Open Platform](https://open.feishu.cn/) or [Lark Developer](https://open.larksuite.com/)
 2. Create app → Get App ID & App Secret
 3. Enable "Robot" → Create Bot
-4. No webhook URL needed (uses WebSocket)
+4. **Enable WebSocket mode**: Events and Callbacks → Mode of event/callback subscription → Select "Receive events/callbacks through persistent connection"
 5. Configure events: `im.message.receive_v1`
 
 ## Usage
@@ -107,26 +99,25 @@ Or manually:
 
 ```bash
 # Discord
-PLATFORM=discord python main.py
+PLATFORM=discord npm run dev
 
 # Feishu/Lark
-PLATFORM=feishu python main.py
+PLATFORM=feishu npm run dev
 ```
 
 ### Discord Commands
 
 ```
-!ask <question>    - Ask the agent
-!reset             - Clear conversation
-!ping              - Check latency
-!info              - Bot info
+/ask <question>    - Ask the agent
+/reset             - Clear conversation
+/ping              - Check latency
+/info              - Bot info
 @BotName <msg>     - Direct mention
 ```
 
 ### Feishu/Lark Commands
 
 ```
-/ask <question>    - Ask the agent
 /reset             - Clear conversation
 /status            - Show current status
 /help              - Show help
@@ -157,14 +148,17 @@ GLM_API_BASE_URL=https://open.bigmodel.cn/api/anthropic
 
 ```
 disclaude/
-├── main.py              # Entry point
-├── config.py            # Configuration & validation
-├── agent_client.py       # Claude Agent SDK wrapper (GLM support)
-├── discord_bot.py       # Discord bot implementation
-├── feishu_bot.py       # Feishu/Lark WebSocket bot
-├── requirements.txt      # Dependencies
-├── .env.example         # Environment template
-└── README.md           # This file
+├── src/
+│   ├── index.ts              # Entry point
+│   ├── config/               # Configuration & validation
+│   ├── agent/                # Claude Agent SDK wrapper (GLM support)
+│   ├── discord/              # Discord bot implementation
+│   ├── feishu/               # Feishu/Lark WebSocket bot
+│   └── types/                # TypeScript type definitions
+├── package.json              # Dependencies
+├── tsconfig.json             # TypeScript config
+├── .env.example              # Environment template
+└── README.md                 # This file
 ```
 
 ## Architecture
@@ -172,7 +166,7 @@ disclaude/
 ```
 ┌─────────────────────────┐
 │  Claude Agent SDK      │
-│  (or GLM API)        │
+│  (or GLM API)          │
 └───────────┬───────────┘
             │
     ┌───────┴────────┐
@@ -201,7 +195,6 @@ disclaude/
 | `GLM_MODEL` | GLM | GLM model name |
 | `GLM_API_BASE_URL` | GLM | GLM API endpoint |
 | `AGENT_WORKSPACE` | No | Workspace directory |
-| `SESSION_PERSISTENCE_PATH` | No | Session persistence file |
 
 ## Troubleshooting
 
@@ -234,13 +227,13 @@ disclaude/
 
 ### Adding Commands
 
-**Discord**: Edit `discord_bot.py` in `DiscordCommands` class.
+**Discord**: Edit `src/discord/commands.ts` and add new command handlers.
 
-**Feishu**: Edit `feishu_bot.py` in `_handle_command` method.
+**Feishu**: Edit `src/feishu/bot.ts` in `handleCommand` method.
 
 ### Customizing Agent Behavior
 
-Edit `agent_client.py` to:
+Edit `src/agent/client.ts` to:
 - Change allowed tools
 - Adjust workspace
 - Customize SDK options

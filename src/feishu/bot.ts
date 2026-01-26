@@ -1,0 +1,226 @@
+/**
+ * Feishu/Lark bot using WebSocket API.
+ */
+import * as lark from '@larksuiteoapi/node-sdk';
+import { EventEmitter } from 'events';
+import { AgentClient } from '../agent/client.js';
+import { Config } from '../config/index.js';
+import type { SessionManager } from './session.js';
+
+/**
+ * Escape text for Lark JSON content format.
+ */
+function escapeLarkText(text: string): string {
+  return text
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\n/g, '\\n')
+    .replace(/\r/g, '\\r');
+}
+
+/**
+ * Feishu/Lark bot using WebSocket.
+ */
+export class FeishuBot extends EventEmitter {
+  readonly agentClient: AgentClient;
+  readonly appId: string;
+  readonly appSecret: string;
+  readonly sessionManager: SessionManager;
+
+  private client?: lark.Client;
+  private wsClient?: lark.WSClient;
+  private eventDispatcher?: lark.EventDispatcher;
+  private running = false;
+
+  constructor(
+    agentClient: AgentClient,
+    appId: string,
+    appSecret: string,
+    sessionManager: SessionManager
+  ) {
+    super();
+    this.agentClient = agentClient;
+    this.appId = appId;
+    this.appSecret = appSecret;
+    this.sessionManager = sessionManager;
+  }
+
+  /**
+   * Get or create Lark HTTP client (for sending messages).
+   */
+  private getClient(): lark.Client {
+    if (!this.client) {
+      this.client = new lark.Client({
+        appId: this.appId,
+        appSecret: this.appSecret,
+      });
+    }
+    return this.client;
+  }
+
+  /**
+   * Send a message to Feishu.
+   */
+  async sendMessage(chatId: string, text: string): Promise<void> {
+    const client = this.getClient();
+    const escapedText = escapeLarkText(text);
+
+    try {
+      await client.im.message.create({
+        params: {
+          receive_id_type: 'chat_id',
+        },
+        data: {
+          receive_id: chatId,
+          msg_type: 'text',
+          content: JSON.stringify({ text: escapedText }),
+        },
+      });
+      console.log(`[Sent] chat_id: ${chatId}`);
+    } catch (error) {
+      console.error(`Failed to send message to ${chatId}:`, error);
+    }
+  }
+
+  /**
+   * Process agent message with streaming response.
+   */
+  async processAgentMessage(chatId: string, prompt: string): Promise<void> {
+    // Get previous session
+    const sessionId = await this.sessionManager.getSessionId(chatId);
+
+    // Send "Processing..." immediately
+    await this.sendMessage(chatId, 'Processing...');
+
+    // Accumulate response text
+    let responseText = '';
+
+    try {
+      // Stream agent response
+      for await (const message of this.agentClient.queryStream(
+        prompt,
+        sessionId ?? undefined
+      )) {
+        // Extract text from message
+        const text = this.agentClient.extractText(message);
+        if (text) {
+          responseText += text;
+        }
+      }
+
+      // Send final response
+      if (responseText) {
+        await this.sendMessage(chatId, responseText);
+      }
+    } catch (error) {
+      console.error(`Agent error for chat ${chatId}:`, error);
+      await this.sendMessage(
+        chatId,
+        `Error: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  /**
+   * Handle slash commands.
+   */
+  async handleCommand(chatId: string, text: string): Promise<void> {
+    if (text === '/reset' || text === '/clear') {
+      await this.sessionManager.clearSession(chatId);
+      await this.sendMessage(chatId, 'Session cleared.');
+    } else if (text === '/status') {
+      const sessionId = await this.sessionManager.getSessionId(chatId);
+      const agentConfig = Config.getAgentConfig();
+      const status = `Model: ${agentConfig.model}\nSession: ${sessionId ? 'Active' : 'None'}`;
+      await this.sendMessage(chatId, status);
+    } else if (text === '/help') {
+      const helpText =
+        'Disclaude Bot\n\n' +
+        'Commands:\n' +
+        '/reset - Clear session\n' +
+        '/status - Show status\n' +
+        '/help - Show this help\n\n' +
+        'Just send a message to interact with agent.';
+      await this.sendMessage(chatId, helpText);
+    } else {
+      await this.sendMessage(chatId, `Unknown command: ${text}`);
+    }
+  }
+
+  /**
+   * Handle incoming message event from WebSocket.
+   */
+  private async handleMessageReceive(data: any): Promise<void> {
+    if (!this.running) return;
+
+    const { message } = data;
+    if (!message) return;
+
+    const { chat_id, content, message_type } = message;
+
+    console.log(`[Received] chat_id: ${chat_id}, type: ${message_type}`);
+
+    // Only handle text messages
+    if (message_type !== 'text') return;
+
+    // Parse content
+    let text = '';
+    try {
+      const parsed = JSON.parse(content);
+      text = parsed.text?.trim() || '';
+    } catch (error) {
+      console.error('[Error] Failed to parse content:', error);
+      return;
+    }
+
+    if (!text) return;
+
+    // Handle command or agent message
+    if (text.startsWith('/')) {
+      await this.handleCommand(chat_id, text);
+    } else {
+      await this.processAgentMessage(chat_id, text);
+    }
+  }
+
+  /**
+   * Start Feishu WebSocket bot.
+   */
+  async start(): Promise<void> {
+    this.running = true;
+    const agentConfig = Config.getAgentConfig();
+    console.log(`Feishu bot starting (model: ${agentConfig.model})...`);
+
+    // Create event dispatcher
+    this.eventDispatcher = new lark.EventDispatcher({}).register({
+      'im.message.receive_v1': async (data: any) => {
+        await this.handleMessageReceive(data);
+      },
+    });
+
+    // Create WebSocket client
+    this.wsClient = new lark.WSClient({
+      appId: this.appId,
+      appSecret: this.appSecret,
+    });
+
+    // Start WebSocket connection
+    await this.wsClient.start({
+      eventDispatcher: this.eventDispatcher,
+    });
+
+    console.log('Feishu WebSocket bot started!');
+
+    // Handle shutdown
+    process.on('SIGINT', () => this.stop());
+  }
+
+  /**
+   * Stop bot.
+   */
+  async stop(): Promise<void> {
+    this.running = false;
+    this.wsClient = undefined;
+    console.log('Feishu bot stopped.');
+  }
+}
