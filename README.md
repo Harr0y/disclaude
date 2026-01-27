@@ -50,9 +50,21 @@ The agent supports extensible tools through MCP servers:
 - `Read` - Read files
 - `Write` - Write files
 
+### Available Custom Skills
+
+**🎯 implement-feature** - Structured feature implementation
+- Guides through: requirements → planning → development → testing
+- Ensures quality and thoroughness
+- Perfect for complex features or vague requirements
+
+**🌐 internet-research** - Web research assistant
+- 3-step research process with structured reporting
+- Uses Playwright browser automation
+- Cross-source verification and citation
+
 ### Adding Custom Tools
 
-Create custom skills by adding files to `.claude/skills/` directory. See [Claude Code Skills documentation](https://docs.anthropic.com/en/docs/build-with-claude/claude-for-developers) for details.
+Create custom skills by adding files to `.claude/skills/<skill-name>/SKILL.md`. See [Claude Code Skills documentation](https://docs.anthropic.com/en/docs/build-with-claude/claude-for-developers) for details.
 
 ## Quick Start
 

@@ -1,31 +1,9 @@
 ---
 name: internet-research
-description: This skill should be used when the user asks to "research", "internet research", "web research", "investigate online", "look something up", or needs to gather information from the web. Follows a 3-step process: 1) create research outline, 2) browse and collect information, 3) summarize findings into a report. Restricts access to only Playwright browser tools.
+description: Gather and synthesize information from the web using browser automation. Use for researching topics, investigating online sources, looking up facts, comparing products, or analyzing web content. Follows 3-step process: outline research, browse and collect data, summarize findings.
 version: 2.0.0
-tools: [
-  "mcp__playwright__browser_click",
-  "mcp__playwright__browser_close",
-  "mcp__playwright__browser_console_messages",
-  "mcp__playwright__browser_drag",
-  "mcp__playwright__browser_evaluate",
-  "mcp__playwright__browser_file_upload",
-  "mcp__playwright__browser_fill_form",
-  "mcp__playwright__browser_handle_dialog",
-  "mcp__playwright__browser_hover",
-  "mcp__playwright__browser_install",
-  "mcp__playwright__browser_navigate",
-  "mcp__playwright__browser_navigate_back",
-  "mcp__playwright__browser_network_requests",
-  "mcp__playwright__browser_press_key",
-  "mcp__playwright__browser_resize",
-  "mcp__playwright__browser_run_code",
-  "mcp__playwright__browser_select_option",
-  "mcp__playwright__browser_snapshot",
-  "mcp__playwright__browser_tabs",
-  "mcp__playwright__browser_take_screenshot",
-  "mcp__playwright__browser_type",
-  "mcp__playwright__browser_wait_for"
-]
+disable-model-invocation: true
+allowed-tools: mcp__playwright__browser_click, mcp__playwright__browser_close, mcp__playwright__browser_console_messages, mcp__playwright__browser_drag, mcp__playwright__browser_evaluate, mcp__playwright__browser_file_upload, mcp__playwright__browser_fill_form, mcp__playwright__browser_handle_dialog, mcp__playwright__browser_hover, mcp__playwright__browser_install, mcp__playwright__browser_navigate, mcp__playwright__browser_navigate_back, mcp__playwright__browser_network_requests, mcp__playwright__browser_press_key, mcp__playwright__browser_resize, mcp__playwright__browser_run_code, mcp__playwright__browser_select_option, mcp__playwright__browser_snapshot, mcp__playwright__browser_tabs, mcp__playwright__browser_take_screenshot, mcp__playwright__browser_type, mcp__playwright__browser_wait_for
 ---
 
 # Internet Research
@@ -109,3 +87,12 @@ Synthesize findings into a structured report:
 ## Usage
 
 Activate by asking to "research [topic]", "investigate [topic]", or "look up [topic]". The skill will guide you through the 3-step process.
+
+## Success Criteria
+
+Research is complete when:
+- ✅ All 3-5 key topic areas from the outline have been investigated
+- ✅ Facts are verified across 3+ authoritative sources
+- ✅ Findings are synthesized into the structured report format
+- ✅ All sources are properly cited with URLs and access dates
+- ✅ Limitations or incomplete information are acknowledged
