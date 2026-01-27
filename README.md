@@ -69,6 +69,21 @@ npm run build
 npm start
 ```
 
+**Background service with PM2:**
+```bash
+# Start the bot as a background service
+npm run pm2:start
+
+# Check status
+npm run pm2:status
+
+# View logs
+npm run pm2:logs
+
+# Stop the service
+npm run pm2:stop
+```
+
 **Using the CLI:**
 ```bash
 disclaude --prompt "your question"
@@ -149,7 +164,9 @@ disclaude/
 │   ├── feishu/               # Feishu/Lark WebSocket bot
 │   ├── types/                # TypeScript type definitions
 │   └── utils/                # Utility functions
+├── logs/                     # PM2 log directory
 ├── package.json              # Dependencies
+├── ecosystem.config.cjs      # PM2 configuration
 ├── tsconfig.json             # TypeScript config
 ├── .env.example              # Environment template
 └── README.md                 # This file
@@ -170,6 +187,30 @@ disclaude/
 │   Bot    │   │  Mode     │
 └──────────┘   └───────────┘
 ```
+
+## Running as a Background Service (PM2)
+
+For running the bot as a persistent background service with automatic restarts:
+
+### PM2 Commands
+
+| Command | Description |
+|---------|-------------|
+| `npm run pm2:start` | Build and start the bot |
+| `npm run pm2:stop` | Stop the bot |
+| `npm run pm2:restart` | Restart the bot |
+| `npm run pm2:reload` | Zero-downtime reload |
+| `npm run pm2:logs` | View logs |
+| `npm run pm2:status` | Check status |
+| `npm run pm2:monit` | Real-time monitoring |
+| `npm run pm2:delete` | Remove from PM2 |
+
+### PM2 Configuration
+
+Edit `ecosystem.config.cjs` to customize:
+- `max_memory_restart`: Memory limit before restart (default: 500M)
+- `error_file` / `out_file`: Log file paths
+- Environment variables
 
 ## Configuration
 
