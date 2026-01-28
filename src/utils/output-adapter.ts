@@ -3,6 +3,9 @@
  * Allows different output destinations (CLI, Feishu, etc.) to share the same message processing logic.
  */
 import type { AgentMessageType } from '../types/agent.js';
+import { createLogger } from './logger.js';
+
+const logger = createLogger('FeishuOutputAdapter');
 
 /**
  * ANSI color codes for terminal output.
@@ -186,6 +189,12 @@ export class FeishuOutputAdapter implements OutputAdapter {
       // Don't return here - let the text message be sent as well for better UX
     }
 
+    // Handle Write tool use with content preview card
+    if (messageType === 'tool_use' && metadata?.toolName === 'Write' && metadata?.toolInputRaw) {
+      await this.sendWriteContentCard(metadata.toolInputRaw);
+      // Don't return here - let the text message be sent as well for better UX
+    }
+
     await this.options.sendMessage(this.options.chatId, content);
   }
 
@@ -194,36 +203,76 @@ export class FeishuOutputAdapter implements OutputAdapter {
    * Dynamically import the diff card builder to avoid circular dependencies.
    */
   private async sendEditDiffCard(toolInput: Record<string, unknown>): Promise<void> {
-    console.log('[Debug Edit] toolInput keys:', Object.keys(toolInput));
-    console.log('[Debug Edit] toolInput:', JSON.stringify(toolInput, null, 2));
+    logger.debug({ keys: Object.keys(toolInput) }, 'Edit tool input keys');
+    logger.debug({ toolInput }, 'Edit tool input');
 
     try {
       // Dynamic import to avoid circular dependencies
       const { parseEditToolInput, buildUnifiedDiffCard } = await import('../feishu/diff-card-builder.js');
 
       const codeChange = parseEditToolInput(toolInput);
-      console.log('[Debug Edit] parseEditToolInput result:', codeChange ? 'SUCCESS' : 'NULL');
+      logger.debug({ success: !!codeChange }, 'Parse edit tool input result');
+
       if (!codeChange) {
-        console.log('[Debug Edit] filePath check:', {
+        logger.debug({
           file_path: toolInput.file_path,
           filePath: toolInput.filePath,
-        });
+        }, 'File path check');
       }
 
       if (codeChange) {
         const card = buildUnifiedDiffCard([codeChange], '📝 代码编辑', 'blue');
-        console.log('[Debug Edit] Card built, sending...');
+        logger.debug('Card built, sending...');
         await this.options.sendCard(this.options.chatId, card);
-        console.log('[Debug Edit] Card sent successfully');
+        logger.debug('Card sent successfully');
         return;
       }
     } catch (error) {
-      console.error('[FeishuAdapter] Failed to send diff card, falling back to text:', error);
+      logger.error({ err: error }, 'Failed to send diff card, falling back to text');
     }
 
     // Fallback: send as plain text
     const filePath = (toolInput.file_path as string | undefined) || (toolInput.filePath as string | undefined) || '<unknown>';
-    console.log('[Debug Edit] Fallback to text, filePath:', filePath);
+    logger.debug({ filePath }, 'Fallback to text');
     await this.options.sendMessage(this.options.chatId, `📝 Editing: ${filePath}`);
+  }
+
+  /**
+   * Send Write tool use as a content preview card.
+   * Shows full content if under threshold, otherwise shows truncated version.
+   */
+  private async sendWriteContentCard(toolInput: Record<string, unknown>): Promise<void> {
+    logger.debug({ keys: Object.keys(toolInput) }, 'Write tool input keys');
+    logger.debug({ toolInput }, 'Write tool input');
+
+    try {
+      // Dynamic import to avoid circular dependencies
+      const { parseWriteToolInput, buildWriteContentCard } = await import('../feishu/write-card-builder.js');
+
+      const writeContent = parseWriteToolInput(toolInput);
+      logger.debug({ success: !!writeContent }, 'Parse write tool input result');
+
+      if (!writeContent) {
+        logger.debug({
+          file_path: toolInput.file_path,
+          filePath: toolInput.filePath,
+        }, 'File path check');
+      }
+
+      if (writeContent) {
+        const card = buildWriteContentCard(writeContent, '✍️ 文件写入', 'green');
+        logger.debug('Card built, sending...');
+        await this.options.sendCard(this.options.chatId, card);
+        logger.debug('Card sent successfully');
+        return;
+      }
+    } catch (error) {
+      logger.error({ err: error }, 'Failed to send write content card, falling back to text');
+    }
+
+    // Fallback: send as plain text
+    const filePath = (toolInput.file_path as string | undefined) || (toolInput.filePath as string | undefined) || '<unknown>';
+    logger.debug({ filePath }, 'Fallback to text');
+    await this.options.sendMessage(this.options.chatId, `✍️ Writing: ${filePath}`);
   }
 }

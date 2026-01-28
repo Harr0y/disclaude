@@ -348,6 +348,39 @@ Create `.claude/skills/<skill-name>/SKILL.md`:
 
 The skill will be available to the agent automatically.
 
+## Documentation Guidelines
+
+### Code Comments Over Separate Documentation
+
+**IMPORTANT**: Do NOT create standalone documentation files (README, guides, etc.) unless explicitly requested by the user.
+
+- **Code explanations**: Write them as JSDoc comments in the source code
+- **Usage examples**: Include them in code comments
+- **Architecture notes**: Add them to the relevant source files
+- **Rationale**: Explain design decisions in inline comments
+
+**Example**:
+```typescript
+/**
+ * Feishu interactive card builder for Write tool content preview.
+ *
+ * This module generates visual cards when the Agent writes files:
+ * - Small files (≤50 lines): Shows complete content
+ * - Large files (>50 lines): Shows truncated preview (first/last 10 lines)
+ *
+ * @see https://open.feishu.cn/document/common-capabilities/message-card
+ */
+export function buildWriteContentCard(...) {
+  // Implementation here
+}
+```
+
+**When to add documentation**:
+- ❌ Don't: Create separate FEATURE.md, IMPLEMENTATION.md, etc.
+- ✅ Do: Add comprehensive JSDoc to functions and classes
+- ✅ Do: Update CLAUDE.md for architecture-level decisions
+- ✅ Do: Add inline comments for complex logic
+
 ## Environment Variables Reference
 
 | Variable | Required | Description |
