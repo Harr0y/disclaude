@@ -89,10 +89,11 @@ export async function uploadFile(
 
     if (fileType === 'image') {
       // Use image upload API for images
-      const fileBuffer = await fs.readFile(filePath);
+      // Note: Must use Stream, not Buffer, due to SDK's form-data dependency
+      const fileStream = fsStream.createReadStream(filePath);
       response = await client.im.image.create({
         data: {
-          image: fileBuffer,
+          image: fileStream,
           image_type: 'message',
         },
       });

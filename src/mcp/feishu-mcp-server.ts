@@ -114,7 +114,7 @@ async function handleMessage(message: unknown) {
             tools: [
               {
                 name: 'send_file_to_feishu',
-                description: 'Send a file to a Feishu chat. Supports images, audio, video, and documents.',
+                description: 'Send a file to a Feishu chat. Use the chatId from the current context (marked as [Current Chat ID: xxx] in the prompt). Supports images, audio, video, and documents.',
                 inputSchema: {
                   type: 'object',
                   properties: {

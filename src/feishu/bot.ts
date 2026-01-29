@@ -203,11 +203,13 @@ export class FeishuBot extends EventEmitter {
 
     // Add context metadata to message for Agent awareness
     // This helps Agent understand the message source without relying on env vars
-    let enhancedPrompt = prompt;
-    if (userId) {
-      enhancedPrompt = `从会话 ${chatId} 收到用户 ${userId} 的消息：${prompt}`;
-      this.logger.debug({ chatId, userId, promptLength: prompt.length }, 'Added message context for Agent');
-    }
+    // Always inject chatId so Agent can use it for tool calls (e.g., send_file_to_feishu)
+    const contextInfo = userId
+      ? `[Current Chat ID: ${chatId}, User ID: ${userId}]`
+      : `[Current Chat ID: ${chatId}]`;
+
+    let enhancedPrompt = `${contextInfo}\n\n${prompt}`;
+    this.logger.debug({ chatId, userId, promptLength: prompt.length }, 'Added chat context to prompt');
 
     // Check if there are pending attachments and include them in the prompt
     if (attachmentManager.hasAttachments(chatId)) {
