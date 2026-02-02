@@ -37,6 +37,7 @@ Thumbs.db
 # Claude Code
 .claude/settings*
 .claude/sessions/
+.claude/plans/
 
 # Playwright MCP
 .playwright-mcp/

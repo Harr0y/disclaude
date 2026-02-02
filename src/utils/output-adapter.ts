@@ -4,6 +4,7 @@
  */
 import type { AgentMessageType } from '../types/agent.js';
 import { createLogger } from './logger.js';
+import * as path from 'path';
 
 const logger = createLogger('FeishuOutputAdapter');
 
@@ -121,6 +122,7 @@ export interface FeishuOutputAdapterOptions {
   sendCard: (chatId: string, card: Record<string, unknown>) => Promise<void>;
   chatId: string;
   throttleIntervalMs?: number;
+  sendFile?: (filePath: string) => Promise<void>;
 }
 
 /**
@@ -169,6 +171,11 @@ export class FeishuOutputAdapter implements OutputAdapter {
     // Skip empty or whitespace-only content
     const trimmedContent = content.trim();
     if (!trimmedContent) {
+      return;
+    }
+
+    // Skip SDK completion messages (they create visual noise)
+    if (messageType === 'result' && trimmedContent.startsWith('✅ Complete')) {
       return;
     }
 
@@ -271,6 +278,20 @@ export class FeishuOutputAdapter implements OutputAdapter {
         logger.debug('Card built, sending...');
         await this.options.sendCard(this.options.chatId, card);
         logger.debug('Card sent successfully');
+
+        // Send task.md file as attachment if applicable
+        if (writeContent.filePath && this.options.sendFile) {
+          const fileName = path.basename(writeContent.filePath);
+          // Check for task.md pattern (files with "task" in name ending with .md)
+          if (fileName.toLowerCase().includes('task') && fileName.endsWith('.md')) {
+            logger.info({ filePath: writeContent.filePath }, 'Sending task.md file to user');
+            // Send file asynchronously, don't block the response
+            this.options.sendFile(writeContent.filePath).catch(err => {
+              logger.error({ err, filePath: writeContent.filePath }, 'Failed to send task.md file');
+            });
+          }
+        }
+
         return true;
       }
     } catch (error) {

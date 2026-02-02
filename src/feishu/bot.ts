@@ -3,11 +3,14 @@
  */
 import * as lark from '@larksuiteoapi/node-sdk';
 import { EventEmitter } from 'events';
-import { AgentClient } from '../agent/client.js';
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import { extractText, InteractionAgent, OrchestrationAgent, ExecutionAgent, AgentDialogueBridge } from '../agent/index.js';
+import type { TaskPlanData } from '../agent/dialogue-bridge.js';
 import { Config } from '../config/index.js';
 import { DEDUPLICATION } from '../config/constants.js';
 import { FeishuOutputAdapter } from '../utils/output-adapter.js';
-import { TaskTracker } from '../utils/task-tracker.js';
+import { TaskTracker, type DialogueTaskPlan } from '../utils/task-tracker.js';
 import { LongTaskManager } from '../long-task/index.js';
 import type { SessionManager } from './session.js';
 import { buildTextContent } from './content-builder.js';
@@ -58,7 +61,6 @@ import { downloadFile } from './file-downloader.js';
  * Feishu/Lark bot using WebSocket.
  */
 export class FeishuBot extends EventEmitter {
-  readonly agentClient: AgentClient;
   readonly appId: string;
   readonly appSecret: string;
   readonly sessionManager: SessionManager;
@@ -80,14 +82,15 @@ export class FeishuBot extends EventEmitter {
   // Active long task managers per chat (one per chat to avoid conflicts)
   private longTaskManagers = new Map<string, LongTaskManager>();
 
+  // Active dialogue bridges per chat
+  private activeDialogues = new Map<string, AgentDialogueBridge>();
+
   constructor(
-    agentClient: AgentClient,
     appId: string,
     appSecret: string,
     sessionManager: SessionManager
   ) {
     super();
-    this.agentClient = agentClient;
     this.appId = appId;
     this.appSecret = appSecret;
     this.sessionManager = sessionManager;
@@ -187,89 +190,171 @@ export class FeishuBot extends EventEmitter {
   }
 
   /**
-   * Process agent message with streaming response.
-   * Each message is sent immediately without accumulation.
-   * Returns accumulated response content for task persistence.
-   * @param messageId - Reserved for future use in task tracking
+   * Send a file to Feishu user as an attachment.
+   * Uploads the file and sends it as a file message.
+   *
+   * @param chatId - Target chat ID
+   * @param filePath - Local file path to send
    */
-  async processAgentMessage(
+  async sendFileToUser(chatId: string, filePath: string): Promise<void> {
+    try {
+      const { uploadAndSendFile } = await import('./file-uploader.js');
+      const fileSize = await uploadAndSendFile(this.getClient(), filePath, chatId);
+      this.logger.info({ chatId, filePath, fileSize }, 'File sent to user');
+    } catch (error) {
+      this.logger.error({ err: error, filePath, chatId }, 'Failed to send file to user');
+      // Don't throw - file sending failure shouldn't break the main flow
+    }
+  }
+
+
+  /**
+   * Handle the complete task flow: Flow 1 (create Task.md) → Flow 2 (execute dialogue)
+   *
+   * DESIGN NOTE: Why create new Agent instances for each message?
+   *
+   * Each user message creates fresh agent instances because:
+   * 1. **Isolation**: No cross-contamination between different user requests
+   * 2. **Simplicity**: No complex state synchronization needed
+   * 3. **Resource Management**: Agents are short-lived, easier to cleanup
+   * 4. **Session Management**: SDK handles session persistence via resume parameter
+   *
+   * The agents themselves are stateless - conversation context is maintained by:
+   * - Agent SDK's native session management (via resume parameter)
+   * - Task.md file on disk (for task records)
+   *
+   * This is INTENTIONAL - do not "optimize" by reusing agent instances.
+   *
+   * NEW FLOW:
+   * Flow 1: InteractionAgent creates Task.md file
+   * Flow 2: Execute dialogue loop with ExecutionAgent ↔ OrchestrationAgent
+   *
+   * @param chatId - Feishu chat ID
+   * @param text - User's message text
+   * @param messageId - Unique message identifier
+   * @param sender - Message sender info
+   * @returns Accumulated response content
+   */
+  private async handleTaskFlow(
     chatId: string,
-    prompt: string,
-    _messageId?: string,
-    userId?: string
+    text: string,
+    messageId: string,
+    sender?: { sender_type?: string; sender_id?: string }
   ): Promise<string> {
-    // Get previous session
-    const sessionId = await this.sessionManager.getSessionId(chatId);
+    const agentConfig = Config.getAgentConfig();
 
-    // Add context metadata to message for Agent awareness
-    // This helps Agent understand the message source without relying on env vars
-    // Always inject chatId so Agent can use it for tool calls (e.g., send_file_to_feishu)
-    const contextInfo = userId
-      ? `[Current Chat ID: ${chatId}, User ID: ${userId}]`
-      : `[Current Chat ID: ${chatId}]`;
+    // === FLOW 1: InteractionAgent creates Task.md ===
+    const taskPath = this.taskTracker.getDialogueTaskPath(messageId);
 
-    let enhancedPrompt = `${contextInfo}\n\n${prompt}`;
-    this.logger.debug({ chatId, userId, promptLength: prompt.length }, 'Added chat context to prompt');
+    const interactionAgent = new InteractionAgent({
+      apiKey: agentConfig.apiKey,
+      model: agentConfig.model,
+      apiBaseUrl: agentConfig.apiBaseUrl,
+    });
+    await interactionAgent.initialize();
 
-    // Check if there are pending attachments and include them in the prompt
-    if (attachmentManager.hasAttachments(chatId)) {
-      const attachmentInfo = attachmentManager.formatAttachmentsForPrompt(chatId);
-      enhancedPrompt = `${enhancedPrompt}\n\n${attachmentInfo}`;
-      this.logger.info({ chatId, attachmentCount: attachmentManager.getAttachmentCount(chatId) }, 'Including pending attachments in prompt');
+    // Set context for Task.md creation
+    interactionAgent.setTaskContext({
+      chatId,
+      userId: sender?.sender_id,
+      messageId,
+      taskPath,
+    });
+
+    // Run InteractionAgent to create Task.md
+    this.logger.info({ messageId, taskPath }, 'Flow 1: InteractionAgent creating Task.md');
+    for await (const msg of interactionAgent.queryStream(text)) {
+      this.logger.debug({ content: msg.content }, 'InteractionAgent output');
+    }
+    this.logger.info({ taskPath }, 'Task.md created by InteractionAgent');
+
+    // === Send task.md content to user ===
+    try {
+      const taskContent = await fs.readFile(taskPath, 'utf-8');
+      await this.sendMessage(chatId, `📋 **任务定义**\n\n${taskContent}\n\n---\n\n**开始执行...**`);
+    } catch (error) {
+      this.logger.error({ err: error, taskPath }, 'Failed to read/send task.md');
     }
 
-    // Create output adapter for this chat with both sendMessage and sendCard
+    // === FLOW 2: Execute dialogue ===
+    // Create agents
+    const orchestrationAgent = new OrchestrationAgent({
+      apiKey: agentConfig.apiKey,
+      model: agentConfig.model,
+      apiBaseUrl: agentConfig.apiBaseUrl,
+      permissionMode: 'bypassPermissions',
+    });
+    await orchestrationAgent.initialize();
+
+    const executionAgent = new ExecutionAgent({
+      apiKey: agentConfig.apiKey,
+      model: agentConfig.model,
+      apiBaseUrl: agentConfig.apiBaseUrl,
+    });
+    await executionAgent.initialize();
+
+    // Create bridge with task plan callback
+    const bridge = new AgentDialogueBridge({
+      orchestrationAgent,
+      executionAgent,
+      maxIterations: 1,
+      onTaskPlanGenerated: async (plan: TaskPlanData) => {
+        await this.taskTracker.saveDialogueTaskPlan(plan as DialogueTaskPlan);
+      },
+    });
+
+    // Store for potential cancellation
+    this.activeDialogues.set(chatId, bridge);
+
+    // Create output adapter for this chat
     const adapter = new FeishuOutputAdapter({
       sendMessage: this.sendMessage.bind(this),
       sendCard: this.sendCard.bind(this),
       chatId,
+      sendFile: this.sendFileToUser.bind(this, chatId),
     });
-
-    // Clear throttle state for this chat
     adapter.clearThrottleState();
 
-    // Accumulate response content for task persistence
+    // Accumulate response content
     const responseChunks: string[] = [];
 
     try {
-      // Stream agent response - send each message immediately
-      for await (const message of this.agentClient.queryStream(
-        enhancedPrompt,
-        sessionId ?? undefined
+      this.logger.debug({ chatId, taskId: path.basename(taskPath, '.md') }, 'Flow 2: Starting dialogue');
+
+      // Run dialogue loop (Flow 2)
+      for await (const message of bridge.runDialogue(
+        taskPath,
+        text,
+        chatId,
+        messageId  // Each messageId has its own session
       )) {
         const content = typeof message.content === 'string'
           ? message.content
-          : this.agentClient.extractText(message);
+          : extractText(message);
 
         if (!content) {
           continue;
         }
 
-        // Accumulate content for task record
         responseChunks.push(content);
 
-        // Use adapter to write message with metadata
+        // Send to user
         await adapter.write(content, message.messageType ?? 'text', {
           toolName: message.metadata?.toolName as string | undefined,
           toolInputRaw: message.metadata?.toolInputRaw as Record<string, unknown> | undefined,
         });
       }
 
-      // Clear attachments after successful processing
-      if (attachmentManager.hasAttachments(chatId)) {
-        const count = attachmentManager.getAttachmentCount(chatId);
-        attachmentManager.clearAttachments(chatId);
-        this.logger.info({ chatId, clearedCount: count }, 'Cleared processed attachments');
-      }
+      const finalResponse = responseChunks.join('\n');
 
-      // Return accumulated response
-      return responseChunks.join('\n');
+      return finalResponse;
     } catch (error) {
+      this.logger.error({ err: error, chatId }, 'Task flow failed');
+
       const enriched = handleError(error, {
         category: ErrorCategory.SDK,
         chatId,
-        sessionId,
-        userMessage: 'Agent processing failed. Please try again.'
+        userMessage: 'Task processing failed. Please try again.'
       }, {
         log: true,
         customLogger: this.logger
@@ -278,8 +363,10 @@ export class FeishuBot extends EventEmitter {
       const errorMsg = `❌ ${enriched.userMessage || enriched.message}`;
       await this.sendMessage(chatId, errorMsg);
 
-      // Don't clear attachments on error - user can retry
       return errorMsg;
+    } finally {
+      // Clean up bridge reference
+      this.activeDialogues.delete(chatId);
     }
   }
 
@@ -673,28 +760,18 @@ export class FeishuBot extends EventEmitter {
     }
 
     {
-      // All messages are processed by the agent (including slash commands for SDK skills)
-      const response = await this.processAgentMessage(
+      // NEW: All non-command messages use Flow 1 → Flow 2 (task flow)
+      // Note: handleTaskFlow already creates Task.md via InteractionAgent,
+      // so we don't use saveTaskRecord here to avoid overwriting it with old format
+      await this.handleTaskFlow(
         chat_id,
         text,
         message_id,
-        sender?.sender_id // Pass userId for message context
+        sender
       );
 
-      // Update task record with actual response
-      if (message_id) {
-        await this.taskTracker.saveTaskRecord(
-          message_id,
-          {
-            chatId: chat_id,
-            senderType: sender?.sender_type,
-            senderId: sender?.sender_id,
-            text,
-            timestamp: create_time || new Date().toISOString(),
-          },
-          response
-        );
-      }
+      // Task.md is already created by InteractionAgent in handleTaskFlow
+      // No need to save separate task record - the Task.md file serves as the record
     }
   }
 

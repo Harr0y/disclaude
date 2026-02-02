@@ -1,0 +1,215 @@
+/**
+ * Skill file loader and parser.
+ *
+ * Loads SKILL.md files from .claude/skills/ directory,
+ * parses YAML frontmatter, and extracts content for use as system prompts.
+ *
+ * This implements the "Skill as Behavior" pattern where skill content
+ * becomes the agent's system prompt and skill frontmatter defines tool access.
+ */
+
+import * as fs from 'fs/promises';
+import * as path from 'path';
+import { createLogger } from '../utils/logger.js';
+
+const logger = createLogger('SkillLoader');
+
+/**
+ * Parsed skill data extracted from SKILL.md file.
+ */
+export interface ParsedSkill {
+  /** Skill name from frontmatter */
+  name: string;
+  /** Skill description from frontmatter */
+  description: string;
+  /** Whether model invocation is disabled */
+  disableModelInvocation: boolean;
+  /** List of allowed tools from frontmatter */
+  allowedTools: string[];
+  /** Markdown content after frontmatter (used as system prompt) */
+  content: string;
+}
+
+/**
+ * Result of loading a skill file.
+ */
+export interface SkillLoadResult {
+  /** Whether the skill was loaded successfully */
+  success: boolean;
+  /** Parsed skill data (only if success=true) */
+  skill?: ParsedSkill;
+  /** Error message (only if success=false) */
+  error?: string;
+}
+
+/**
+ * Parse YAML frontmatter from skill content.
+ *
+ * Extracts:
+ * - name
+ * - description
+ * - disable-model-invocation
+ * - allowed-tools (both comma-separated and array formats)
+ *
+ * @param content - Raw skill file content
+ * @returns Parsed frontmatter and content start position
+ */
+function parseSkillFrontmatter(content: string): {
+  frontmatter: Record<string, unknown>;
+  contentStart: number;
+} {
+  const frontmatterRegex = /^---\s*\n([\s\S]*?)\n---\s*\n/;
+  const match = content.match(frontmatterRegex);
+
+  if (!match) {
+    return { frontmatter: {}, contentStart: 0 };
+  }
+
+  const [, frontmatterText] = match;
+  const frontmatter: Record<string, unknown> = {};
+
+  // Parse key-value pairs
+  const lines = frontmatterText.split('\n');
+  for (const line of lines) {
+    const colonIndex = line.indexOf(':');
+    if (colonIndex === -1) {continue;}
+
+    const key = line.slice(0, colonIndex).trim();
+    const value = line.slice(colonIndex + 1).trim();
+
+    switch (key) {
+      case 'name':
+      case 'description':
+        frontmatter[key] = value;
+        break;
+      case 'disable-model-invocation':
+        frontmatter['disableModelInvocation'] = value === 'true';
+        break;
+      case 'allowed-tools':
+        // Could be comma-separated or array format
+        if (value.startsWith('[')) {
+          // Array format - parse later
+          frontmatter[key] = value;
+        } else {
+          // Comma-separated
+          frontmatter['allowedTools'] = value.split(',')
+            .map(t => t.trim())
+            .filter(t => t.length > 0);
+        }
+        break;
+    }
+  }
+
+  // Handle array format for allowed-tools: [tool1, tool2, tool3]
+  if (!frontmatter['allowedTools'] && frontmatter['allowed-tools']) {
+    const arrayValue = String(frontmatter['allowed-tools']);
+    const match = arrayValue.match(/\[(.*?)\]/s);
+    if (match) {
+      frontmatter['allowedTools'] = match[1]
+        .split(',')
+        .map(t => t.trim())
+        .filter(t => t.length > 0);
+    }
+  }
+
+  return {
+    frontmatter,
+    contentStart: match[0].length
+  };
+}
+
+/**
+ * Load a skill file from .claude/skills directory.
+ *
+ * @param skillName - Name of the skill directory (e.g., "interaction-agent")
+ * @returns Parsed skill data or error
+ */
+export async function loadSkill(skillName: string): Promise<SkillLoadResult> {
+  try {
+    const skillPath = path.join(
+      process.cwd(),
+      '.claude',
+      'skills',
+      skillName,
+      'SKILL.md'
+    );
+
+    logger.debug({ skillName, skillPath }, 'Loading skill file');
+
+    const content = await fs.readFile(skillPath, 'utf-8');
+    const { frontmatter, contentStart } = parseSkillFrontmatter(content);
+
+    const skillContent = content.slice(contentStart).trim();
+
+    const skill: ParsedSkill = {
+      name: (frontmatter['name'] as string) || skillName,
+      description: (frontmatter['description'] as string) || '',
+      disableModelInvocation: (frontmatter['disableModelInvocation'] as boolean) ?? false,
+      allowedTools: (frontmatter['allowedTools'] as string[]) || [],
+      content: skillContent,
+    };
+
+    logger.info({
+      skillName: skill.name,
+      toolCount: skill.allowedTools.length,
+      contentLength: skillContent.length,
+    }, 'Skill loaded successfully');
+
+    return { success: true, skill };
+
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    logger.error({ err: error, skillName }, 'Failed to load skill');
+
+    return {
+      success: false,
+      error: errorMessage
+    };
+  }
+}
+
+/**
+ * Load a skill file and throw error if it fails.
+ * Use this when skill is required (no fallback).
+ *
+ * @param skillName - Name of the skill directory
+ * @returns Parsed skill data
+ * @throws Error if skill loading fails
+ */
+export async function loadSkillOrThrow(skillName: string): Promise<ParsedSkill> {
+  const result = await loadSkill(skillName);
+
+  if (!result.success || !result.skill) {
+    throw new Error(
+      `Required skill "${skillName}" failed to load. ` +
+      `Error: ${result.error || 'Unknown error'}. ` +
+      `Please ensure .claude/skills/${skillName}/SKILL.md exists and is valid.`
+    );
+  }
+
+  return result.skill;
+}
+
+/**
+ * Get MCP server configuration for a skill.
+ *
+ * Some skills (like execution-agent) need MCP servers.
+ * This can be extended or made configurable via skill frontmatter in the future.
+ *
+ * @param skillName - Name of the skill
+ * @returns MCP server configuration or undefined
+ */
+export function getSkillMcpServers(skillName: string): Record<string, unknown> | undefined {
+  // Execution agent needs Playwright MCP server
+  if (skillName === 'execution-agent') {
+    return {
+      playwright: {
+        type: 'stdio',
+        command: 'npx',
+        args: ['@playwright/mcp@latest'],
+      },
+    };
+  }
+
+  return undefined;
+}

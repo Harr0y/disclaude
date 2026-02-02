@@ -2,6 +2,10 @@ import * as fs from 'fs/promises';
 import * as syncFs from 'fs';
 import * as path from 'path';
 import { Config } from '../config/index.js';
+import type { TaskDefinitionDetails } from '../mcp/feishu-context-mcp.js';
+
+// Re-export TaskDefinitionDetails for convenience
+export type { TaskDefinitionDetails };
 
 /**
  * Long task plan interface for type safety.
@@ -30,14 +34,28 @@ export interface SubtaskResult {
 }
 
 /**
+ * Dialogue task plan interface for type safety.
+ * Used by AgentDialogueBridge for OrchestrationAgent + ExecutionAgent dialogue mode.
+ */
+export interface DialogueTaskPlan {
+  taskId: string;
+  title: string;
+  description: string;
+  milestones: string[];
+  originalRequest: string;
+  createdAt: string;
+}
+
+/**
  * Task tracker for persisting message processing records to disk.
  * Provides unified recording for both regular tasks and long tasks.
  *
  * Directory structure:
  * tasks/
- * ├── regular/              # Regular single-turn tasks
- * │   └── {message_id}.md
- * └── long-tasks/           # Long multi-step tasks
+ * ├── regular/              # All dialogue tasks (default + Flow 2)
+ * │   └── {message_id}/
+ * │       └── task.md
+ * └── long-tasks/           # Long multi-step tasks (/long command)
  *     └── {task_id}/
  *         ├── TASK_PLAN.md
  *         ├── subtask-1-result.json
@@ -90,13 +108,58 @@ export class TaskTracker {
   }
 
   /**
+   * Ensure a specific task directory exists.
+   * @param messageId - Unique message identifier
+   */
+  private async ensureTaskDir(messageId: string): Promise<string> {
+    await this.ensureRegularTasksDir();
+    const sanitized = messageId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const taskDir = path.join(this.regularTasksDir, sanitized);
+    try {
+      await fs.mkdir(taskDir, { recursive: true });
+      return taskDir;
+    } catch (error) {
+      console.error(`Failed to create task directory for ${messageId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Ensure a specific task directory exists (synchronous).
+   * @param messageId - Unique message identifier
+   */
+  private ensureTaskDirSync(messageId: string): string {
+    const dirExists = syncFs.existsSync(this.regularTasksDir);
+    if (!dirExists) {
+      try {
+        syncFs.mkdirSync(this.regularTasksDir, { recursive: true });
+      } catch (error) {
+        console.error('Failed to create regular tasks directory:', error);
+        throw error;
+      }
+    }
+    const sanitized = messageId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const taskDir = path.join(this.regularTasksDir, sanitized);
+    const taskDirExists = syncFs.existsSync(taskDir);
+    if (!taskDirExists) {
+      try {
+        syncFs.mkdirSync(taskDir, { recursive: true });
+      } catch (error) {
+        console.error(`Failed to create task directory for ${messageId}:`, error);
+        throw error;
+      }
+    }
+    return taskDir;
+  }
+
+  /**
    * Get file path for a regular task record.
    */
   getTaskFilePath(messageId: string): string {
     // Sanitize message_id to make it a valid filename
     // Replace characters that are invalid in filenames
     const sanitized = messageId.replace(/[^a-zA-Z0-9_-]/g, '_');
-    return path.join(this.regularTasksDir, `${sanitized}.md`);
+    return path.join(this.regularTasksDir, sanitized, 'task.md');
   }
 
   /**
@@ -129,13 +192,13 @@ export class TaskTracker {
     },
     content: string
   ): Promise<void> {
-    await this.ensureRegularTasksDir();
+    await this.ensureTaskDir(messageId);
 
     const filePath = this.getTaskFilePath(messageId);
     const timestamp = metadata.timestamp || new Date().toISOString();
 
-    // Format content as Markdown
-    const markdown = this.formatTaskRecord(messageId, metadata, content, timestamp);
+    // Use new dialogue format
+    const markdown = this.formatDialogueTaskRecord(messageId, metadata, content, timestamp);
 
     try {
       await fs.writeFile(filePath, markdown, 'utf-8');
@@ -164,22 +227,14 @@ export class TaskTracker {
     },
     content: string
   ): void {
-    // Ensure directory exists synchronously
-    const dirExists = syncFs.existsSync(this.regularTasksDir);
-    if (!dirExists) {
-      try {
-        syncFs.mkdirSync(this.regularTasksDir, { recursive: true });
-      } catch (error) {
-        console.error('Failed to create regular tasks directory:', error);
-        return;
-      }
-    }
+    // Ensure task directory exists synchronously
+    this.ensureTaskDirSync(messageId);
 
     const filePath = this.getTaskFilePath(messageId);
     const timestamp = metadata.timestamp || new Date().toISOString();
 
-    // Format content as Markdown
-    const markdown = this.formatTaskRecord(messageId, metadata, content, timestamp);
+    // Use new dialogue format
+    const markdown = this.formatDialogueTaskRecord(messageId, metadata, content, timestamp);
 
     try {
       syncFs.writeFileSync(filePath, markdown, 'utf-8');
@@ -190,9 +245,9 @@ export class TaskTracker {
   }
 
   /**
-   * Format task record as Markdown.
+   * Format task record as Markdown (new dialogue format).
    */
-  private formatTaskRecord(
+  private formatDialogueTaskRecord(
     messageId: string,
     metadata: {
       chatId: string;
@@ -203,28 +258,151 @@ export class TaskTracker {
     content: string,
     timestamp: string
   ): string {
-    const lines = [
-      `# Task Record: ${messageId}`,
-      '',
-      '**Metadata**',
-      `- Message ID: ${messageId}`,
-      `- Chat ID: ${metadata.chatId}`,
-      `- Timestamp: ${timestamp}`,
-      metadata.senderType ? `- Sender Type: ${metadata.senderType}` : '',
-      metadata.senderId ? `- Sender ID: ${metadata.senderId}` : '',
-      '',
-      '**User Input**',
-      '```',
-      metadata.text,
-      '```',
-      '',
-      '**Bot Response**',
-      '```',
-      content,
-      '```',
-    ].filter(line => line !== ''); // Remove empty lines from conditional fields
+    // Extract title from first line or first 50 chars
+    const [firstLine] = metadata.text.split('\n');
+    const title = firstLine.substring(0, 50) + (firstLine.length > 50 ? '...' : '');
 
-    return lines.join('\n');
+    return `# Task: ${title}
+
+**Task ID**: ${messageId}
+**Created**: ${timestamp}
+**Chat ID**: ${metadata.chatId}
+**User ID**: ${metadata.senderId || 'N/A'}
+${metadata.senderType ? `**Sender Type**: ${metadata.senderType}` : ''}
+
+## Original Request
+
+\`\`\`
+${metadata.text}
+\`\`\`
+
+## Bot Response
+
+\`\`\`
+${content}
+\`\`\`
+`;
+  }
+
+  // ===== Dialogue Task Methods (Flow 1: Task.md creation) =====
+
+  /**
+   * Get dialogue task file path.
+   * Uses regular tasks directory for all dialogue tasks.
+   * @param messageId - Unique message identifier
+   * @returns Full path to the dialogue task file
+   */
+  getDialogueTaskPath(messageId: string): string {
+    const sanitized = messageId.replace(/[^a-zA-Z0-9_-]/g, '_');
+    return path.join(this.regularTasksDir, sanitized, 'task.md');
+  }
+
+  /**
+   * Create initial Task.md file (Flow 1 output).
+   * This creates the task file that will be used as input for Flow 2.
+   *
+   * @param messageId - Unique message identifier
+   * @param metadata - Task metadata (chatId, userId, text, timestamp)
+   * @returns Path to the created task file
+   */
+  async createDialogueTask(
+    messageId: string,
+    metadata: {
+      chatId: string;
+      userId?: string;
+      text: string;
+      timestamp?: string;
+    }
+  ): Promise<string> {
+    await this.ensureTaskDir(messageId);
+
+    const taskPath = this.getDialogueTaskPath(messageId);
+    const timestamp = metadata.timestamp || new Date().toISOString();
+
+    // Extract title from first line or first 50 chars
+    const [firstLine] = metadata.text.split('\n');
+    const title = firstLine.substring(0, 50) + (firstLine.length > 50 ? '...' : '');
+
+    const content = `# Task: ${title}
+
+**Task ID**: ${messageId}
+**Created**: ${timestamp}
+**Chat ID**: ${metadata.chatId}
+**User ID**: ${metadata.userId || 'N/A'}
+
+## Original Request
+
+\`\`\`
+${metadata.text}
+\`\`\`
+`;
+
+    try {
+      await fs.writeFile(taskPath, content, 'utf-8');
+      console.log(`[Dialogue task created] ${messageId} -> ${taskPath}`);
+      return taskPath;
+    } catch (error) {
+      console.error(`[Dialogue task creation failed] ${messageId}:`, error);
+      throw error;
+    }
+  }
+
+  /**
+   * Append task definition details to existing Task.md file.
+   * Called after InteractionAgent completes the definition phase.
+   *
+   * @param taskPath - Path to the Task.md file
+   * @param details - Task definition details from InteractionAgent
+   */
+  async appendTaskDefinition(
+    taskPath: string,
+    details: TaskDefinitionDetails
+  ): Promise<void> {
+    const existingContent = await fs.readFile(taskPath, 'utf-8');
+
+    const appendContent = `
+
+## Task Objectives
+
+### Primary Goal
+${details.primary_goal}
+
+### Success Criteria
+${details.success_criteria.map(c => `- ${c}`).join('\n')}
+
+### Expected Outcome
+${details.expected_outcome}
+
+## Delivery Specifications
+
+### Required Deliverables
+${details.deliverables.map(d => `- ${d}`).join('\n')}
+${details.format_requirements?.length ? `
+### Format Requirements
+${details.format_requirements.map(r => `- ${r}`).join('\n')}
+` : ''}
+${details.constraints?.length ? `
+### Constraints
+${details.constraints.map(c => `- ${c}`).join('\n')}
+` : ''}
+
+## Quality Criteria
+
+${details.quality_criteria.map(q => `- ${q}`).join('\n')}
+
+---
+
+*Task definition generated by InteractionAgent*
+*This document serves as a record and will not be modified during execution.*
+`;
+
+    try {
+      await fs.writeFile(taskPath, existingContent + appendContent, 'utf-8');
+      console.log(`[Task definition appended] ${taskPath}`);
+    } catch (error) {
+      console.error(`[Task definition append failed] ${taskPath}:`, error);
+      throw error;
+    }
   }
 
   // ===== Long Task Methods =====
@@ -308,6 +486,62 @@ export class TaskTracker {
       console.error(`[Long task summary save failed] ${taskId}:`, error);
       throw error;
     }
+  }
+
+  // ===== Dialogue Task Methods =====
+
+  /**
+   * Save dialogue task plan to disk.
+   * Used by AgentDialogueBridge for OrchestrationAgent + ExecutionAgent dialogue mode.
+   * @param plan - Dialogue task plan object
+   */
+  async saveDialogueTaskPlan(plan: DialogueTaskPlan): Promise<void> {
+    const taskDir = await this.ensureLongTaskDir(plan.taskId);
+    const planFile = path.join(taskDir, 'TASK_PLAN.md');
+
+    const content = this.formatDialogueTaskPlan(plan);
+
+    try {
+      await fs.writeFile(planFile, content, 'utf-8');
+      console.log(`[Dialogue task plan saved] ${plan.taskId} -> ${planFile}`);
+    } catch (error) {
+      console.error(`[Dialogue task plan save failed] ${plan.taskId}:`, error);
+      // Don't throw - dialogue should continue even if plan save fails
+    }
+  }
+
+  /**
+   * Format dialogue task plan as Markdown.
+   */
+  private formatDialogueTaskPlan(plan: DialogueTaskPlan): string {
+    const milestonesList = plan.milestones.length > 0
+      ? plan.milestones.map((m, i) => `${i + 1}. ${m}`).join('\n')
+      : 'No specific milestones defined';
+
+    const content = `# Task Plan: ${plan.title}
+
+**Task ID**: ${plan.taskId}
+**Created**: ${plan.createdAt}
+**Mode**: OrchestrationAgent + ExecutionAgent Dialogue
+
+## Original Request
+
+${plan.originalRequest}
+
+## Description
+
+${plan.description}
+
+## Milestones
+
+${milestonesList}
+
+---
+
+*Generated by OrchestrationAgent via AgentDialogueBridge*
+`;
+
+    return content;
   }
 
   /**

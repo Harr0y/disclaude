@@ -3,6 +3,8 @@
  */
 import type { SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type {
+  AgentMessage,
+  ContentBlock,
   ParsedSDKMessage,
 } from '../types/agent.js';
 import { Config } from '../config/index.js';
@@ -595,4 +597,65 @@ export function parseSDKMessage(message: SDKMessage): ParsedSDKMessage {
       // Ignore user messages (echoes) and stream events
       return { type: 'text', content: '' };
   }
+}
+
+/**
+ * Extract text from AgentMessage.
+ * Handles both string content and array content with text blocks.
+ *
+ * This is the canonical extractText function - use this instead of
+ * duplicating the logic in agent classes.
+ *
+ * @param message - AgentMessage to extract text from
+ * @returns Extracted text content
+ */
+export function extractText(message: AgentMessage): string {
+  const { content } = message;
+
+  if (typeof content === 'string') {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .filter((block): block is ContentBlock & { text: string } =>
+        'text' in block && typeof block.text === 'string'
+      )
+      .map(block => block.text)
+      .join('');
+  }
+
+  return '';
+}
+
+/**
+ * Build SDK environment variables with unified apiBaseUrl handling.
+ * This function centralizes environment variable setup for all agents.
+ *
+ * @param apiKey - API key for authentication
+ * @param apiBaseUrl - Optional base URL for API requests (e.g., for GLM)
+ * @param extraEnv - Optional extra environment variables to merge
+ * @returns Environment object for SDK options
+ */
+export function buildSdkEnv(
+  apiKey: string,
+  apiBaseUrl?: string,
+  extraEnv?: Record<string, string | undefined>
+): Record<string, string | undefined> {
+  const nodeBinDir = getNodeBinDir();
+  const newPath = `${nodeBinDir}:${process.env.PATH || ''}`;
+
+  const env: Record<string, string | undefined> = {
+    ANTHROPIC_API_KEY: apiKey,
+    PATH: newPath,
+    ...extraEnv,
+    ...(process.env as Record<string, string | undefined>),
+  };
+
+  // Set base URL if provided (for GLM or custom endpoints)
+  if (apiBaseUrl) {
+    env.ANTHROPIC_BASE_URL = apiBaseUrl;
+  }
+
+  return env;
 }

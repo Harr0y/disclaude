@@ -119,17 +119,21 @@ export async function handleHelpCommand(
 • /long <task> - Start long task workflow (24h timeout, multi-step)
 • /cancel - Cancel running long task
 
+**Task Mode (Default):**
+• All messages use dual-agent mode (ExecutionAgent + OrchestrationAgent)
+
 **Examples:**
 \`\`\`
-/long Analyze the codebase and create comprehensive documentation
-/long Refactor the authentication system with tests
+Analyze the authentication system
+/long Refactor user module with tests
 /reset
 \`\`\`
 
-**Tips:**
-• Long tasks can run for up to 24 hours
-• Use /cancel to stop a long task
-• All other messages are processed by the AI agent
+**How It Works:**
+1. Your message creates a Task.md file
+2. ExecutionAgent explores and executes
+3. OrchestrationAgent evaluates and plans
+4. Loop continues until task is complete
 `;
 
   await sendMessage(chatId, helpMessage);

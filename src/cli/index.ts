@@ -3,12 +3,15 @@
  * Executes a single prompt from command line arguments and exits.
  */
 
-import { AgentClient } from '../agent/client.js';
+import * as fs from 'fs/promises';
+import { InteractionAgent, OrchestrationAgent, ExecutionAgent, AgentDialogueBridge } from '../agent/index.js';
 import { Config } from '../config/index.js';
 import { CLIOutputAdapter, FeishuOutputAdapter } from '../utils/output-adapter.js';
 import { createFeishuSender, createFeishuCardSender } from '../feishu/sender.js';
 import { createLogger } from '../utils/logger.js';
 import { handleError, ErrorCategory } from '../utils/error-handler.js';
+import { extractText } from '../utils/sdk.js';
+import { TaskTracker } from '../utils/task-tracker.js';
 
 const logger = createLogger('CLI');
 
@@ -45,19 +48,73 @@ async function executeOnce(
   agentConfig: ReturnType<typeof Config.getAgentConfig>,
   feishuChatId?: string
 ): Promise<void> {
-  // Initialize agent client
-  const agent = new AgentClient({
+  // Create unique messageId for CLI session
+  const messageId = `cli-${Date.now()}`;
+  const chatId = feishuChatId || 'cli-console';
+  const taskTracker = new TaskTracker();
+
+  // === FLOW 1: InteractionAgent creates Task.md ===
+  const taskPath = taskTracker.getDialogueTaskPath(messageId);
+
+  const interactionAgent = new InteractionAgent({
     apiKey: agentConfig.apiKey,
     model: agentConfig.model,
     apiBaseUrl: agentConfig.apiBaseUrl,
-    permissionMode: 'bypassPermissions', // Auto-approve actions for CLI convenience
+  });
+  await interactionAgent.initialize();
+
+  // Set context for Task.md creation
+  interactionAgent.setTaskContext({
+    chatId,
+    messageId,
+    taskPath,
   });
 
-  // Create output adapter based on mode
+  // Run InteractionAgent to create Task.md
+  logger.info({ messageId, taskPath }, 'Flow 1: InteractionAgent creating Task.md');
+  for await (const msg of interactionAgent.queryStream(prompt)) {
+    logger.debug({ content: msg.content }, 'InteractionAgent output');
+  }
+
+  // Verify Task.md was created
+  try {
+    await fs.access(taskPath);
+  } catch {
+    throw new Error(
+      `InteractionAgent failed to create Task.md at ${taskPath}. ` +
+      `The model may not have called the Write tool. ` +
+      `Please check if the model supports tool calling properly.`
+    );
+  }
+
+  logger.info({ taskPath }, 'Task.md created by InteractionAgent');
+
+  // === FLOW 2: Create agents and dialogue bridge ===
+  const orchestrationAgent = new OrchestrationAgent({
+    apiKey: agentConfig.apiKey,
+    model: agentConfig.model,
+    apiBaseUrl: agentConfig.apiBaseUrl,
+    permissionMode: 'bypassPermissions',
+  });
+  await orchestrationAgent.initialize();
+
+  const executionAgent = new ExecutionAgent({
+    apiKey: agentConfig.apiKey,
+    model: agentConfig.model,
+    apiBaseUrl: agentConfig.apiBaseUrl,
+  });
+  await executionAgent.initialize();
+
+  const bridge = new AgentDialogueBridge({
+    orchestrationAgent,
+    executionAgent,
+    maxIterations: 1,
+  });
+
+  // Create output adapter
   let adapter: CLIOutputAdapter | FeishuOutputAdapter;
 
   if (feishuChatId) {
-    // Feishu mode: create sender and adapter
     const sendToFeishu = createFeishuSender();
     const sendCardToFeishu = createFeishuCardSender();
     adapter = new FeishuOutputAdapter({
@@ -68,30 +125,37 @@ async function executeOnce(
     });
     logger.info({ chatId: feishuChatId }, 'Output will be sent to Feishu chat');
   } else {
-    // Default CLI mode: output to console
     adapter = new CLIOutputAdapter();
   }
 
-  // Stream agent response
-  for await (const message of agent.queryStream(prompt)) {
-    const content = typeof message.content === 'string'
-      ? message.content
-      : agent.extractText(message);
+  try {
+    // Run dialogue loop (Flow 2)
+    for await (const message of bridge.runDialogue(
+      taskPath,
+      prompt,
+      chatId,
+      messageId
+    )) {
+      const content = typeof message.content === 'string'
+        ? message.content
+        : extractText(message);
 
-    if (!content) {
-      continue;
+      if (!content) {
+        continue;
+      }
+
+      // Use adapter to write message
+      await adapter.write(content, message.messageType ?? 'text');
     }
 
-    // Use adapter to write message
-    await adapter.write(content, message.messageType ?? 'text');
-  }
-
-  // Ensure final newline/cleanup
-  if ('finalize' in adapter) {
-    (adapter as CLIOutputAdapter).finalize();
-  }
-  if ('clearThrottleState' in adapter) {
-    (adapter as FeishuOutputAdapter).clearThrottleState();
+  } finally {
+    // Ensure final cleanup
+    if ('finalize' in adapter) {
+      (adapter as CLIOutputAdapter).finalize();
+    }
+    if ('clearThrottleState' in adapter) {
+      (adapter as FeishuOutputAdapter).clearThrottleState();
+    }
   }
 }
 
