@@ -17,7 +17,7 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { parseSDKMessage, buildSdkEnv } from '../utils/sdk.js';
 import { Config } from '../config/index.js';
-import type { AgentMessage, SessionInfo } from '../types/agent.js';
+import type { AgentMessage } from '../types/agent.js';
 import { createLogger } from '../utils/logger.js';
 import { loadSkill, type ParsedSkill } from './skill-loader.js';
 
@@ -56,7 +56,6 @@ export class Planner {
   readonly model: string;
   readonly apiBaseUrl: string | undefined;
   readonly workingDirectory: string;
-  private currentSessionId?: string;
   private taskContext?: TaskContext;
   private skill?: ParsedSkill;
   private initialized = false;
@@ -114,7 +113,7 @@ export class Planner {
    * Create SDK options for interaction agent.
    * Tool configuration comes from the skill file.
    */
-  private createSdkOptions(resume?: string): Record<string, unknown> {
+  private createSdkOptions(): Record<string, unknown> {
     const allowedTools = this.skill?.allowedTools || ['Write', 'WebSearch'];
 
     this.logger.debug({
@@ -138,13 +137,6 @@ export class Planner {
     // Set model
     if (this.model) {
       sdkOptions.model = this.model;
-    }
-
-    // Resume session
-    if (resume) {
-      sdkOptions.resume = resume;
-    } else if (this.currentSessionId) {
-      sdkOptions.resume = this.currentSessionId;
     }
 
     return sdkOptions;
@@ -210,16 +202,16 @@ Use your exploration and analysis INTERNALLY to inform the Expected Results sect
   /**
    * Stream agent response.
    */
-  async *queryStream(prompt: string, sessionId?: string): AsyncIterable<AgentMessage> {
+  async *queryStream(prompt: string): AsyncIterable<AgentMessage> {
     // Ensure skill is loaded before processing
     if (!this.initialized) {
       await this.initialize();
     }
 
-    this.logger.debug({ sessionId, promptLength: prompt.length }, 'Starting planner query');
+    this.logger.debug({ promptLength: prompt.length }, 'Starting planner query');
 
     try {
-      const sdkOptions = this.createSdkOptions(sessionId);
+      const sdkOptions = this.createSdkOptions();
 
       this.logger.debug({
         hasTaskContext: !!this.taskContext,
@@ -239,10 +231,6 @@ Use your exploration and analysis INTERNALLY to inform the Expected Results sect
 
       for await (const message of queryResult) {
         const parsed = parseSDKMessage(message);
-
-        if (parsed.sessionId) {
-          this.currentSessionId = parsed.sessionId;
-        }
 
         if (!parsed.content) {
           continue;
@@ -266,27 +254,13 @@ Use your exploration and analysis INTERNALLY to inform the Expected Results sect
   }
 
   /**
-   * Get session info.
-   */
-  getSessionInfo(): SessionInfo {
-    return {
-      sessionId: this.currentSessionId,
-      resume: this.currentSessionId,
-    };
-  }
-
-  /**
-   * Cleanup resources and clear session.
+   * Cleanup resources.
    *
    * Call this method when the agent is no longer needed to:
-   * - Clear session ID to release SDK resources
    * - Clear task context
-   *
-   * Note: Planner does not use MCP servers, so no MCP cleanup needed.
    */
   cleanup(): void {
-    this.logger.debug({ sessionId: this.currentSessionId }, 'Cleaning up Planner agent');
-    this.currentSessionId = undefined;
+    this.logger.debug('Cleaning up Planner agent');
     this.taskContext = undefined;
   }
 }

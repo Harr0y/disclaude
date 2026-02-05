@@ -6,7 +6,6 @@
  */
 
 import { LongTaskManager } from '../long-task/index.js';
-import type { SessionManager } from './session.js';
 import { createLogger } from '../utils/logger.js';
 
 const logger = createLogger('CommandHandlers');
@@ -17,7 +16,6 @@ const logger = createLogger('CommandHandlers');
 export interface CommandHandlerContext {
   chatId: string;
   sendMessage: (chatId: string, message: string) => Promise<void>;
-  sessionManager: SessionManager;
   longTaskManagers: Map<string, LongTaskManager>;
 }
 
@@ -27,48 +25,40 @@ export interface CommandHandlerContext {
 export async function handleResetCommand(
   context: CommandHandlerContext
 ): Promise<void> {
-  const { chatId, sendMessage, sessionManager } = context;
+  const { chatId, sendMessage } = context;
 
   logger.info({ chatId }, 'Reset command triggered');
 
   try {
-    // Clear session for this chat
-    sessionManager.clearSession(chatId);
-
+    // Sessions are no longer tracked - each task is independent
     await sendMessage(
       chatId,
-      '✅ Conversation history cleared. Starting fresh.'
+      '✅ Each conversation is independent. Just send a new message to start fresh.'
     );
   } catch (error) {
-    logger.error({ err: error, chatId }, 'Failed to clear session');
+    logger.error({ err: error, chatId }, 'Failed to send reset response');
 
     await sendMessage(
       chatId,
-      '❌ Failed to clear conversation history. Please try again.'
+      '❌ Failed to process reset command. Please try again.'
     );
   }
 }
 
 /**
- * Handle /status command - show current session and task status
+ * Handle /status command - show current task status
  */
 export async function handleStatusCommand(
   context: CommandHandlerContext
 ): Promise<void> {
-  const { chatId, sendMessage, sessionManager, longTaskManagers } = context;
+  const { chatId, sendMessage, longTaskManagers } = context;
 
   logger.info({ chatId }, 'Status command triggered');
 
   try {
-    // Get session status
-    const sessionId = sessionManager.getSessionId(chatId);
-    const sessionStatus = sessionId
-      ? `✅ Active session (${sessionId.slice(0, 8)}...)`
-      : '⚠️ No active session';
-
     // Get long task status
     const taskManager = longTaskManagers.get(chatId);
-    let taskStatus = '⚠️ No long task is currently running.';
+    let statusMessage = '📊 **Current Status**\n\n';
 
     if (taskManager) {
       const activeTasks = taskManager.getActiveTasks();
@@ -80,12 +70,13 @@ export async function handleStatusCommand(
           )
           .join('\n\n');
 
-        taskStatus = `📊 **Long Task Status**\n\nActive tasks: ${activeTasks.size}\n\n${tasksInfo}`;
+        statusMessage += `📊 **Long Task Status**\n\nActive tasks: ${activeTasks.size}\n\n${tasksInfo}`;
+      } else {
+        statusMessage += '⚠️ No long task is currently running.';
       }
+    } else {
+      statusMessage += '⚠️ No long task is currently running.\n\n💡 Regular tasks run independently and don\'t have persistent status.';
     }
-
-    // Combine status
-    const statusMessage = `📊 **Session Status**\n\n${sessionStatus}\n\n${taskStatus}`;
 
     await sendMessage(chatId, statusMessage);
   } catch (error) {

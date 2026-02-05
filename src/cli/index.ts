@@ -4,7 +4,7 @@
  */
 
 import * as fs from 'fs/promises';
-import { Planner, Manager, Worker, AgentDialogueBridge } from '../agent/index.js';
+import { Planner, AgentDialogueBridge } from '../agent/index.js';
 import { Config } from '../config/index.js';
 import { CLIOutputAdapter, FeishuOutputAdapter } from '../utils/output-adapter.js';
 import { createFeishuSender, createFeishuCardSender } from '../feishu/sender.js';
@@ -93,25 +93,20 @@ async function executeOnce(
 
   logger.info({ taskPath }, 'Task.md created by Planner');
 
-  // === FLOW 2: Create agents and dialogue bridge ===
-  const manager = new Manager({
-    apiKey: agentConfig.apiKey,
-    model: agentConfig.model,
-    apiBaseUrl: agentConfig.apiBaseUrl,
-    permissionMode: 'bypassPermissions',
-  });
-  await manager.initialize();
-
-  const worker = new Worker({
-    apiKey: agentConfig.apiKey,
-    model: agentConfig.model,
-    apiBaseUrl: agentConfig.apiBaseUrl,
-  });
-  await worker.initialize();
-
+  // === FLOW 2: Create dialogue bridge ===
+  // The bridge will create fresh Manager/Worker instances per iteration
   const bridge = new AgentDialogueBridge({
-    manager,
-    worker,
+    managerConfig: {
+      apiKey: agentConfig.apiKey,
+      model: agentConfig.model,
+      apiBaseUrl: agentConfig.apiBaseUrl,
+      permissionMode: 'bypassPermissions',
+    },
+    workerConfig: {
+      apiKey: agentConfig.apiKey,
+      model: agentConfig.model,
+      apiBaseUrl: agentConfig.apiBaseUrl,
+    },
   });
 
   // Create output adapter

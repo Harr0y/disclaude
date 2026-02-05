@@ -21,7 +21,7 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { parseSDKMessage, buildSdkEnv } from '../utils/sdk.js';
 import { Config } from '../config/index.js';
-import type { AgentMessage, SessionInfo } from '../types/agent.js';
+import type { AgentMessage } from '../types/agent.js';
 import { createLogger } from '../utils/logger.js';
 import { loadSkill, getSkillMcpServers, type ParsedSkill } from './skill-loader.js';
 
@@ -48,7 +48,6 @@ export class Worker {
   readonly model: string;
   readonly apiBaseUrl: string | undefined;
   readonly workingDirectory: string;
-  private currentSessionId?: string;
   private skill?: ParsedSkill;
   private initialized = false;
   private logger = createLogger('Worker', { model: '' });
@@ -96,7 +95,7 @@ export class Worker {
    * Create SDK options for worker agent.
    * Tool configuration comes from the skill file.
    */
-  private createSdkOptions(resume?: string): Record<string, unknown> {
+  private createSdkOptions(): Record<string, unknown> {
     // Tool configuration from skill file
     const allowedTools = this.skill?.allowedTools || [
       'Skill',
@@ -159,29 +158,22 @@ export class Worker {
       sdkOptions.model = this.model;
     }
 
-    // Resume session
-    if (resume) {
-      sdkOptions.resume = resume;
-    } else if (this.currentSessionId) {
-      sdkOptions.resume = this.currentSessionId;
-    }
-
     return sdkOptions;
   }
 
   /**
    * Stream agent response.
    */
-  async *queryStream(prompt: string, sessionId?: string): AsyncIterable<AgentMessage> {
+  async *queryStream(prompt: string): AsyncIterable<AgentMessage> {
     // Ensure skill is loaded before processing
     if (!this.initialized) {
       await this.initialize();
     }
 
-    this.logger.debug({ sessionId, promptLength: prompt.length }, 'Starting worker query');
+    this.logger.debug({ promptLength: prompt.length }, 'Starting worker query');
 
     try {
-      const sdkOptions = this.createSdkOptions(sessionId);
+      const sdkOptions = this.createSdkOptions();
 
       const queryResult = query({
         prompt,
@@ -190,10 +182,6 @@ export class Worker {
 
       for await (const message of queryResult) {
         const parsed = parseSDKMessage(message);
-
-        if (parsed.sessionId) {
-          this.currentSessionId = parsed.sessionId;
-        }
 
         if (!parsed.content) {
           continue;
@@ -217,33 +205,9 @@ export class Worker {
   }
 
   /**
-   * Get session info.
-   */
-  getSessionInfo(): SessionInfo {
-    return {
-      sessionId: this.currentSessionId,
-      resume: this.currentSessionId,
-    };
-  }
-
-  /**
-   * Cleanup resources and clear session.
-   *
-   * Call this method when the agent is no longer needed to:
-   * - Clear session ID to release SDK resources
-   * - Allow SDK to clean up MCP server instances associated with the session
-   *
-   * **Memory Management:**
-   * - Session IDs are cleared, allowing SDK to release conversation context
-   * - MCP server instances (playwright) are created per query by SDK
-   * - Worker does not hold persistent MCP server references
-   * - SDK handles cleanup of MCP server instances automatically when queries complete
-   *
-   * Note: MCP server configurations are passed to SDK on each query.
-   * The SDK manages the lifecycle of these server instances.
+   * Cleanup resources.
    */
   cleanup(): void {
-    this.logger.debug({ sessionId: this.currentSessionId }, 'Cleaning up Worker agent');
-    this.currentSessionId = undefined;
+    this.logger.debug('Cleaning up Worker agent');
   }
 }

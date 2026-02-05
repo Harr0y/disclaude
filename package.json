@@ -22,6 +22,8 @@
     "lint:fix": "eslint src --fix",
     "format": "prettier --write \"src/**/*.ts\"",
     "format:check": "prettier --check \"src/**/*.ts\"",
+    "test": "vitest",
+    "test:coverage": "vitest --coverage",
     "pm2:start": "npm run build && pm2 start ecosystem.config.cjs",
     "pm2:stop": "pm2 stop disclaude-feishu",
     "pm2:restart": "pm2 restart disclaude-feishu",
@@ -56,7 +58,8 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.19.1",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.8",
+    "vitest-tsconfig-paths": "^3.4.1"
   },
   "engines": {
     "node": ">=18.0.0"

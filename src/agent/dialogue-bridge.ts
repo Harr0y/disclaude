@@ -1,26 +1,16 @@
 /**
  * AgentDialogueBridge - Manages prompt-based dialogue between Manager and Worker.
  *
- * NEW Architecture (Flow 2):
- * - Task.md content → Worker FIRST (executes/explores)
- * - Worker intermediate output → Manager (progress monitoring, optional feedback)
- * - Worker output with 'result' type → Manager (evaluates/plans)
- * - Manager output → Worker (next steps)
+ * NEW Architecture (Manager-First Flow):
+ * - First iteration: Manager reads Task.md, provides initial planning → Worker executes
+ * - Subsequent iterations: Manager evaluates (Task.md + previous Worker output) FIRST
+ *   - If Manager calls task_done → Task complete, end immediately
+ *   - If not complete → Manager provides instructions → Worker executes
  * - Loop continues until Manager calls task_done
  *
  * Completion detection:
  * - Via task_done tool call only
  * - When called, loop ends and final message is sent to user
- *
- * Session Management:
- * - Each messageId has its own Manager session
- * - Sessions are stored internally in taskSessions Map
- * - This allows multiple parallel tasks within the same chat
- *
- * Execution Phase Detection:
- * - SDK sends 'result' message type when Worker completes (no more tool calls)
- * - Before 'result': Intermediate messages (tool_use, tool_progress, tool_result) → Manager for progress monitoring
- * - After 'result': Execution complete, Manager evaluates and decides next steps
  *
  * **CRITICAL DESIGN PRINCIPLE:**
  * Worker output is NOT automatically sent to users. Only Manager decides what to send.
@@ -29,11 +19,10 @@
  * - This ensures Manager is the sole interface layer for user communication
  * - Worker is a background worker - Manager is the user interface
  *
- * **NEW: Progress Updates During Execution**
- * - Manager receives Worker's intermediate messages BEFORE 'result' for real-time monitoring
- * - Manager can send user feedback via `send_user_feedback` tool during execution
- * - This enables real-time updates for long-running tasks
- * - Manager's session persists across both progress updates and completion reports
+ * **NO SESSION STATE ACROSS ITERATIONS:**
+ * - Each iteration creates FRESH Manager and Worker instances
+ * - Context is maintained via Task.md file and previousWorkerOutput storage
+ * - No cross-iteration session IDs needed
  */
 import type { AgentMessage } from '../types/agent.js';
 import { extractText } from '../utils/sdk.js';
@@ -41,8 +30,8 @@ import { DIALOGUE } from '../config/constants.js';
 import { createLogger } from '../utils/logger.js';
 import * as path from 'path';
 import * as fs from 'fs/promises';
-import type { Manager } from './manager.js';
-import type { Worker } from './worker.js';
+import { Manager, type ManagerConfig } from './manager.js';
+import { Worker, type WorkerConfig } from './worker.js';
 
 const logger = createLogger('AgentDialogueBridge', {});
 
@@ -79,31 +68,24 @@ export interface TaskPlanData {
 
 /**
  * Agent dialogue configuration.
+ * Now accepts agent configs instead of instances to enable fresh instance creation per iteration.
  */
 export interface DialogueBridgeConfig {
-  manager: Manager;
-  worker: Worker;
+  managerConfig: ManagerConfig;
+  workerConfig: WorkerConfig;
   /** Callback when manager generates a task plan */
   onTaskPlanGenerated?: (plan: TaskPlanData) => Promise<void>;
 }
 
 /**
- * AgentDialogueBridge - Manages Flow 2 dialogue loop between agents.
+ * AgentDialogueBridge - Manages Manager-First dialogue loop between agents.
  *
- * NEW Flow with Progress Updates:
- * 1. User request from Task.md → Worker (works/explores first)
- * 2. For each intermediate Worker message (before 'result'):
- *    - Send to Manager as progress update
- *    - Manager can send user feedback via send_user_feedback (optional)
- *    - Continue Worker execution
- * 3. When SDK sends 'result' → Worker output → Manager (evaluates/plans)
- * 4. Manager output → Worker (next instructions) OR task_done
- * 5. Loop until Manager calls task_done
- *
- * Key change: Manager receives Worker output during AND after execution.
- * - Before 'result': Progress updates for real-time monitoring
- * - After 'result': Completion report for evaluation and decision-making
- * - Worker works silently - only Manager decides what to send to users
+ * NEW Manager-First Flow:
+ * 1. First iteration: Manager reads Task.md, provides initial planning → Worker executes
+ * 2. Subsequent iterations: Manager evaluates (Task.md + previous Worker output) FIRST
+ *    - If complete → task_done → END
+ *    - If not complete → Manager provides next instructions → Worker executes
+ * 3. Loop until Manager calls task_done
  *
  * **User Communication (Manager-only):**
  * - Manager uses `send_user_feedback` or `send_user_card` MCP tools to communicate with users
@@ -112,8 +94,8 @@ export interface DialogueBridgeConfig {
  * - Worker output is NEVER directly shown to users - Manager decides what to share
  */
 export class AgentDialogueBridge {
-  readonly manager: Manager;
-  readonly worker: Worker;
+  readonly managerConfig: ManagerConfig;
+  readonly workerConfig: WorkerConfig;
   /** Maximum iterations from constants - single source of truth */
   readonly maxIterations = DIALOGUE.MAX_ITERATIONS;
   private onTaskPlanGenerated?: (plan: TaskPlanData) => Promise<void>;
@@ -122,170 +104,14 @@ export class AgentDialogueBridge {
   private taskPlanSaved = false;
   private userMessageSent = false;  // Track if any user message was sent
 
+  // Store previous Worker output for Manager evaluation in next iteration
+  private previousWorkerOutput?: string;
+
   constructor(config: DialogueBridgeConfig) {
-    this.manager = config.manager;
-    this.worker = config.worker;
+    // Store config instead of instances - instances will be created per iteration
+    this.managerConfig = config.managerConfig;
+    this.workerConfig = config.workerConfig;
     this.onTaskPlanGenerated = config.onTaskPlanGenerated;
-  }
-
-  /**
-   * Build evaluation prompt for Manager.
-   * Combines: Task.md context + Worker output + Evaluation instruction
-   *
-   * This ensures Manager has all context needed to:
-   * 1. Understand the original request (from Task.md)
-   * 2. See what Worker produced
-   * 3. Know how to evaluate completion or monitor progress
-   * 4. Extract chatId for task_done tool
-   *
-   * @param taskMdContent - Full Task.md content with original request and metadata
-   * @param executionOutput - Worker's output text
-   * @param iteration - Current iteration number
-   * @param isCompletion - Whether this is a completion report (true) or progress update (false)
-   * @returns Complete evaluation prompt
-   */
-  private buildEvaluationPrompt(
-    taskMdContent: string,
-    executionOutput: string,
-    iteration: number,
-    isCompletion: boolean
-  ): string {
-    const reportType = isCompletion ? 'Completion Report' : 'Progress Report';
-    const taskInstruction = isCompletion
-      ? `You are the **Manager**. Worker has **completed** work on the task above.
-
-### CRITICAL - How to Signal Completion
-
-When the task is complete, follow this EXACT order:
-
-**Step 1:** Send the final message to the user
-\`\`\`
-send_user_feedback({
-  content: "Your response to the user...",
-  chatId: "EXTRACT_CHAT_ID_FROM_TASK_MD"
-})
-\`\`\`
-
-**Step 2:** Signal completion
-\`\`\`
-task_done({
-  chatId: "EXTRACT_CHAT_ID_FROM_TASK_MD"
-})
-\`\`\`
-
-Replace EXTRACT_CHAT_ID_FROM_TASK_MD with the Chat ID value from Task.md.
-
-**IMPORTANT:** The user will NOT see your text response. They only see messages sent via send_user_feedback.
-
-### Step 1: Evaluate Completion
-Compare Worker output against the Expected Results in Task.md:
-- Is the user's original request satisfied?
-- Has the expected deliverable been produced?
-- Is the response complete and adequate?
-
-### Step 2: Take Action
-
-**If COMPLETE** → Send message via send_user_feedback, then call task_done
-**If INCOMPLETE** → Provide next instructions for Worker`
-      : `You are the **Manager**. Worker is **still working** on the task above.
-
-### Your Role: Monitor Progress
-
-This is a **progress update** - Worker is still executing:
-- Monitor what Worker has done so far
-- Check if Worker is on the right track
-- Provide real-time feedback to users if needed
-- **DO NOT** call task_done yet - execution is not complete
-
-### Waiting State Detection
-
-**IMPORTANT:** Check if Worker's output indicates a WAITING STATE.
-
-**Waiting indicators:**
-- Keywords: "waiting", "sleep", "background", "approximately", "will take", "estimated"
-- Tool calls: \`sleep\` command with duration > 5 seconds
-- Time mentions: "2-3 minutes", "about 30 seconds"
-- Phrases: "starting build", "downloading", "compiling", "generating", "in progress"
-
-**If waiting state detected:**
-1. Extract what Worker is waiting for
-2. Extract estimated time if provided
-3. Send user-friendly waiting notification
-4. DO NOT call task_done
-5. Wait for next message
-
-**Waiting notification template:**
-\`\`\`typescript
-send_user_feedback({
-  content: "⏳ Worker 正在: [activity]\\n\\n预计时间: [estimate]\\n\\n请稍候，完成后会立即通知您...",
-  chatId: "EXTRACT_CHAT_ID_FROM_TASK_MD"
-})
-\`\`\`
-
-**Example:**
-Worker says: "Starting build process... [sleep 120]"
-
-You respond:
-\`\`\`typescript
-send_user_feedback({
-  content: "⏳ Worker 正在执行构建任务\\n\\n预计时间: 2-3 分钟\\n\\n请稍候，完成后会立即通知您...",
-  chatId: "EXTRACTED_CHAT_ID"
-})
-\`\`\`
-
-### What You Can Do
-
-**Option 1:** Send progress updates to user
-\`\`\`
-send_user_feedback({
-  content: "Worker is currently working on...",
-  chatId: "EXTRACT_CHAT_ID_FROM_TASK_MD"
-})
-\`\`\`
-
-**Option 2:** Just monitor silently
-- No action needed if Worker is progressing well
-- Wait for the next completion report to evaluate results
-
-**IMPORTANT:** The user will NOT see your text response. They only see messages sent via send_user_feedback.
-
-**DO NOT** call task_done during progress updates - only in completion reports.`;
-
-    const examples = isCompletion ? `### Examples
-
-For greeting "hi":
-send_user_feedback({ content: "Hello! I'm here to help.", chatId: "..." })
-task_done({ chatId: "..." })
-
-For code analysis:
-send_user_feedback({ content: "Analysis complete. Found 5 functions.", chatId: "..." })
-task_done({ chatId: "..." })
-
-For rich card content:
-send_user_feedback({ content: { card: {...} }, format: "card", chatId: "..." })
-task_done({ chatId: "..." })` : `### Example Progress Update
-
-send_user_feedback({ content: "Worker is reading the source files...", chatId: "..." })`;
-
-    return `${taskMdContent}
-
----
-
-## ${reportType} (Iteration ${iteration}/${this.maxIterations})
-
-\`\`\`
-${executionOutput}
-\`\`\`
-
----
-
-## Your Evaluation Task
-
-${taskInstruction}
-
-${examples}
-
-**IMPORTANT**: The task_done and send_user_feedback tools ARE available. Look for them in your tool list and use them!`;
   }
 
   /**
@@ -305,39 +131,19 @@ ${examples}
   }
 
   /**
-   * Cleanup resources held by the dialogue bridge and agents.
+   * Cleanup resources held by the dialogue bridge.
    *
    * **IMPORTANT**: Call this method when the dialogue is complete to prevent memory leaks.
    *
-   * Cleanup actions:
-   * - Clear session IDs in Manager and Worker agents
-   * - Release SDK conversation context resources
-   * - Reset dialogue bridge state
-   * - Allow SDK to clean up MCP server instances associated with sessions
-   *
-   * **Memory Leak Prevention:**
-   * - Sessions are stored in both Manager and Worker agents
-   * - Without cleanup, session IDs accumulate and hold SDK resources
-   * - MCP server instances (feishu-context, playwright) are tied to sessions
-   * - SDK automatically cleans up per-query MCP instances when sessions end
-   *
-   * **Resource Lifecycle:**
-   * 1. Dialogue starts → Manager/Worker create new sessions
-   * 2. Each query → SDK creates temporary MCP server instances
-   * 3. Dialogue ends → cleanup() called → Session IDs cleared
-   * 4. SDK detects session end → Releases MCP instances and resources
-   *
-   * Note: The feishuSdkMcpServer is a module-level singleton that persists
-   * across dialogues. It is intentionally not cleaned up here.
+   * Reset all state variables to their initial values.
    */
   cleanup(): void {
     logger.debug({ taskId: this.taskId }, 'Cleaning up dialogue bridge');
-    this.manager.cleanup();
-    this.worker.cleanup();
     this.taskId = '';
     this.originalRequest = '';
     this.taskPlanSaved = false;
     this.userMessageSent = false;
+    this.previousWorkerOutput = undefined;
   }
 
   /**
@@ -487,182 +293,6 @@ ${examples}
   }
 
   /**
-   * Build execution instruction for Worker's first prompt.
-   *
-   * This tells Worker:
-   * - Its role and responsibilities
-   * - How to interpret the task.md
-   * - What to focus on when working
-   *
-   * @returns Execution instruction string
-   */
-  private buildExecutionInstruction(): string {
-    return `## Your Role
-
-You are the **Worker**. Your job is to execute the task described above.
-
-### What You Should Do
-
-1. **Read the task carefully** - Review Original Request and Expected Results
-2. **Use tools appropriately** - You have full access to development tools
-3. **Execute the work** - Complete what's needed to satisfy the Expected Results
-4. **Report clearly** - Provide a clear summary of what you did and the outcomes
-
-### Important Notes
-
-- Focus on **execution** - get the work done
-- The Manager will evaluate your results and decide next steps
-- You don't need to signal completion - just report what you did
-- Be thorough but efficient
-
-**Now execute the task.**`;
-  }
-
-  /**
-   * Send progress update to Manager during Worker execution.
-   *
-   * This allows Manager to monitor Worker's progress in real-time and optionally
-   * send user feedback via send_user_feedback tool.
-   *
-   * @param taskMdContent - Full Task.md content
-   * @param intermediateOutput - Worker's intermediate output
-   * @param iteration - Current iteration number
-   * @returns true if Manager called task_done (should not happen during progress)
-   */
-  private async sendProgressUpdate(
-    taskMdContent: string,
-    intermediateOutput: string,
-    iteration: number
-  ): Promise<boolean> {
-    const progressPrompt = this.buildEvaluationPrompt(
-      taskMdContent,
-      intermediateOutput,
-      iteration,
-      false  // isCompletion = false for progress updates
-    );
-
-    logger.debug({
-      iteration,
-      outputLength: intermediateOutput.length,
-    }, 'Sending progress update to Manager');
-
-    const managerProgressMessages: AgentMessage[] = [];
-    for await (const managerMsg of this.manager.queryStream(progressPrompt)) {
-      managerProgressMessages.push(managerMsg);
-
-      if (managerMsg.metadata?.toolName) {
-        logger.debug({
-          iteration,
-          toolName: managerMsg.metadata.toolName,
-          toolInput: managerMsg.metadata.toolInput,
-        }, 'Manager tool call during progress update');
-      }
-    }
-
-    const progressCompletion = this.detectCompletion(managerProgressMessages);
-    if (progressCompletion?.completed) {
-      logger.warn(
-        { iteration },
-        'Manager called task_done during progress update - unexpected but accepting'
-      );
-      return true;  // Task completed
-    }
-
-    return false;  // Continue execution
-  }
-
-  /**
-   * Collect Worker messages and send progress updates to Manager.
-   *
-   * Streams Worker's output and sends intermediate messages to Manager for
-   * real-time monitoring. Continues until SDK sends 'result' message type.
-   *
-   * @param currentPrompt - Worker's current prompt
-   * @param taskMdContent - Full Task.md content
-   * @param iteration - Current iteration number
-   * @returns Worker's execution messages and completion status
-   */
-  private async collectWorkerMessages(
-    currentPrompt: string,
-    taskMdContent: string,
-    iteration: number
-  ): Promise<{ messages: AgentMessage[]; completed: boolean }> {
-    const executionMessages: AgentMessage[] = [];
-
-    logger.debug({ iteration, promptLength: currentPrompt.length }, 'Worker working');
-
-    for await (const msg of this.worker.queryStream(currentPrompt)) {
-      executionMessages.push(msg);
-
-      // Send intermediate messages to Manager for progress monitoring
-      if (msg.messageType && msg.messageType !== 'result') {
-        const intermediateOutput = extractText(msg);
-        const completed = await this.sendProgressUpdate(taskMdContent, intermediateOutput, iteration);
-
-        if (completed) {
-          return { messages: executionMessages, completed: true };
-        }
-      }
-    }
-
-    return { messages: executionMessages, completed: false };
-  }
-
-  /**
-   * Query Manager with completion report.
-   *
-   * Sends Worker's complete output to Manager for evaluation and decision-making.
-   * Manager evaluates completion and either calls task_done or provides next instructions.
-   *
-   * @param taskMdContent - Full Task.md content
-   * @param executionOutput - Worker's complete output
-   * @param iteration - Current iteration number
-   * @returns Manager messages and completion status
-   */
-  private async queryManagerCompletion(
-    taskMdContent: string,
-    executionOutput: string,
-    iteration: number
-  ): Promise<{ messages: AgentMessage[]; completed: boolean; output: string }> {
-    const evaluationPrompt = this.buildEvaluationPrompt(
-      taskMdContent,
-      executionOutput,
-      iteration,
-      true  // isCompletion = true for completion report
-    );
-
-    logger.debug({ iteration }, 'Sending completion report to Manager');
-
-    const managerMessages: AgentMessage[] = [];
-    for await (const msg of this.manager.queryStream(evaluationPrompt)) {
-      managerMessages.push(msg);
-
-      if (msg.metadata?.toolName) {
-        logger.debug({
-          iteration,
-          toolName: msg.metadata.toolName,
-          toolInput: msg.metadata.toolInput,
-        }, 'Manager tool call detected');
-      }
-    }
-
-    const completion = this.detectCompletion(managerMessages);
-    const managerOutput = managerMessages.map(msg => extractText(msg)).join('');
-
-    logger.debug({
-      iteration,
-      outputLength: managerOutput.length,
-      completed: completion?.completed,
-    }, 'Manager completion response received');
-
-    return {
-      messages: managerMessages,
-      completed: completion?.completed ?? false,
-      output: managerOutput,
-    };
-  }
-
-  /**
    * Save task plan on first iteration.
    *
    * Extracts and saves task plan from Manager's first output.
@@ -711,85 +341,329 @@ Suggestions:
   }
 
   /**
-   * Process a single dialogue iteration.
+   * Build planning prompt for Manager (first iteration).
    *
-   * Coordinates the Worker-Manager interaction for one iteration:
-   * 1. Worker executes the current prompt
-   * 2. Manager evaluates the completion status
-   * 3. Either completes or prepares for next iteration
+   * Manager reads Task.md and provides initial planning/instructions for Worker.
    *
-   * @param currentPrompt - Current prompt for Worker
    * @param taskMdContent - Full Task.md content
-   * @param iteration - Current iteration number
-   * @returns Object containing completion status and next prompt (if any)
+   * @returns Planning prompt for Manager
    */
-  private async processIteration(
-    currentPrompt: string,
-    taskMdContent: string,
-    iteration: number
-  ): Promise<{ completed: boolean; nextPrompt?: string }> {
-    // === Phase 1: Worker executes ===
-    const { messages: executionMessages, completed: workerCompleted } =
-      await this.collectWorkerMessages(currentPrompt, taskMdContent, iteration);
+  private buildPlanningPrompt(taskMdContent: string): string {
+    return `${taskMdContent}
 
-    // Early exit if Manager signaled completion during progress updates
-    if (workerCompleted) {
-      return { completed: true };
-    }
+---
 
-    // === Phase 2: Validate execution completion ===
-    const executionComplete = isExecutionComplete(executionMessages);
-    if (!executionComplete) {
-      logger.warn({ iteration }, 'No result message found - unexpected state');
-      // Continue to next iteration to attempt recovery
-      return { completed: false, nextPrompt: currentPrompt };
-    }
+## Your Task
 
-    const executionOutput = executionMessages.map(msg => extractText(msg)).join('');
-    logger.debug({
-      iteration,
-      executionOutputLength: executionOutput.length,
-    }, 'Worker execution phase complete');
+You are the **Manager**. This is the **first iteration** - you need to provide initial planning for the Worker.
 
-    // === Phase 3: Manager evaluates and decides ===
-    const { completed, output: managerOutput } =
-      await this.queryManagerCompletion(taskMdContent, executionOutput, iteration);
+### Your Role
 
-    // Save task plan on first iteration
-    await this.saveTaskPlanIfNeeded(managerOutput, iteration);
+1. **Analyze the task** - Review the Original Request and Expected Results in Task.md
+2. **Create a plan** - Break down the task into clear steps
+3. **Provide instructions** - Give the Worker specific guidance on what to do first
 
-    if (completed) {
-      logger.info({ iteration }, 'Task completed via task_done');
-      return { completed: true };
-    }
+### What to Provide
 
-    // Manager's output becomes the next Worker prompt
-    return { completed: false, nextPrompt: managerOutput };
+Output your planning as clear instructions for the Worker:
+- What should be explored or done first
+- What files to read or create
+- What approach to take
+- Any priorities or considerations
+
+**IMPORTANT**: Do NOT call task_done yet - this is just the initial planning phase.
+The Worker will execute your instructions, and then you'll evaluate the results in the next iteration.
+
+**Remember**: The user will NOT see your text response. They only see messages sent via send_user_feedback.
+If you want to update the user about your plan, use send_user_feedback first.
+
+Your planning output will be passed directly to the Worker as their instructions.
+`;
   }
 
   /**
-   * Run a dialogue loop (Flow 2).
+   * Build evaluation prompt for Manager (subsequent iterations).
    *
-   * NEW FLOW with Progress Updates:
-   * 1. Worker works on prompt, SDK streams messages
-   * 2. For each intermediate message (before 'result'):
-   *    - Send to Manager as progress update
-   *    - Manager can optionally send user feedback via send_user_feedback
-   *    - Continue collecting Worker messages
-   * 3. When SDK sends 'result', execution is complete → send completion report to Manager
-   * 4. Manager evaluates and either:
-   *    - Calls task_done → task done
-   *    - Provides next instructions → becomes new Worker prompt
-   * 5. Loop continues until task_done is called
+   * Manager evaluates Task.md + previous Worker output to determine if task is complete.
    *
-   * Key insight: SDK's 'result' message type signals execution completion.
-   * - Before 'result': Intermediate messages → Manager for progress monitoring (dialogue continues)
-   * - After 'result': Completion report → Manager for evaluation and decision-making
+   * @param taskMdContent - Full Task.md content
+   * @param workerOutput - Previous Worker's output
+   * @param iteration - Current iteration number
+   * @returns Evaluation prompt for Manager
+   */
+  private buildEvaluationPrompt(
+    taskMdContent: string,
+    workerOutput: string,
+    iteration: number
+  ): string {
+    return `${taskMdContent}
+
+---
+
+## Previous Worker Output (Iteration ${iteration - 1})
+
+\`\`\`
+${workerOutput}
+\`\`\`
+
+---
+
+## Your Evaluation Task
+
+You are the **Manager**. Worker has completed work based on your previous instructions.
+
+### Step 1: Evaluate Completion
+
+Compare Worker's output against the Expected Results in Task.md:
+- Is the user's original request satisfied?
+- Has the expected deliverable been produced?
+- Is the response complete and adequate?
+
+### Step 2: Take Action
+
+**If COMPLETE** → Follow this EXACT order:
+
+**Step A:** Send the final message to the user
+\`\`\`
+send_user_feedback({
+  content: "Your response to the user...",
+  chatId: "EXTRACT_CHAT_ID_FROM_TASK_MD"
+})
+\`\`\`
+
+**Step B:** Signal completion
+\`\`\`
+task_done({
+  chatId: "EXTRACT_CHAT_ID_FROM_TASK_MD"
+})
+\`\`\`
+
+Replace EXTRACT_CHAT_ID_FROM_TASK_MD with the Chat ID value from Task.md.
+
+**If INCOMPLETE** → Provide next instructions for Worker:
+- What still needs to be done
+- What the Worker should focus on next
+- Any corrections or additional requirements
+
+**IMPORTANT**: The user will NOT see your text response. They only see messages sent via send_user_feedback.
+
+**IMPORTANT**: The task_done and send_user_feedback tools ARE available. Look for them in your tool list and use them!
+`;
+  }
+
+  /**
+   * Query Manager and parse response.
+   *
+   * @param manager - Manager instance
+   * @param prompt - Prompt to send to Manager
+   * @param iteration - Current iteration number
+   * @returns Manager messages, completion status, and output text
+   */
+  private async queryManager(
+    manager: Manager,
+    prompt: string,
+    iteration: number
+  ): Promise<{ messages: AgentMessage[]; completed: boolean; output: string }> {
+    logger.debug({ iteration, promptLength: prompt.length }, 'Querying Manager');
+
+    const managerMessages: AgentMessage[] = [];
+    for await (const msg of manager.queryStream(prompt)) {
+      managerMessages.push(msg);
+
+      if (msg.metadata?.toolName) {
+        logger.debug({
+          iteration,
+          toolName: msg.metadata.toolName,
+          toolInput: msg.metadata.toolInput,
+        }, 'Manager tool call detected');
+      }
+    }
+
+    const completion = this.detectCompletion(managerMessages);
+    const managerOutput = managerMessages.map(msg => extractText(msg)).join('');
+
+    logger.debug({
+      iteration,
+      outputLength: managerOutput.length,
+      completed: completion?.completed,
+    }, 'Manager response received');
+
+    return {
+      messages: managerMessages,
+      completed: completion?.completed ?? false,
+      output: managerOutput,
+    };
+  }
+
+  /**
+   * Execute Worker with given prompt.
+   *
+   * @param worker - Worker instance
+   * @param prompt - Prompt for Worker
+   * @returns Worker's output text
+   */
+  private async executeWorker(
+    worker: Worker,
+    prompt: string
+  ): Promise<string> {
+    logger.debug({ promptLength: prompt.length }, 'Executing Worker');
+
+    const workerMessages: AgentMessage[] = [];
+    for await (const msg of worker.queryStream(prompt)) {
+      workerMessages.push(msg);
+    }
+
+    const workerOutput = workerMessages.map(msg => extractText(msg)).join('');
+
+    logger.debug({ outputLength: workerOutput.length }, 'Worker execution complete');
+
+    return workerOutput;
+  }
+
+  /**
+   * Build Worker prompt combining Task.md and Manager's instructions.
+   *
+   * @param taskMdContent - Full Task.md content
+   * @param managerInstructions - Manager's instructions for Worker
+   * @returns Complete prompt for Worker
+   */
+  private buildWorkerPrompt(taskMdContent: string, managerInstructions: string): string {
+    return `${taskMdContent}
+
+---
+
+## Manager's Instructions
+
+${managerInstructions}
+
+---
+
+## Your Role
+
+You are the **Worker**. Execute the task according to the Manager's instructions above.
+
+### What You Should Do
+
+1. **Follow the Manager's guidance** - Use their instructions as your primary direction
+2. **Use tools appropriately** - You have full access to development tools
+3. **Report clearly** - Provide a clear summary of what you did and the outcomes
+
+### Important Notes
+
+- Focus on **execution** - get the work done
+- The Manager will evaluate your results and decide next steps
+- You don't need to signal completion - just report what you did
+- Be thorough but efficient
+`;
+  }
+
+  /**
+   * Process a single dialogue iteration with Manager-first flow.
+   *
+   * First iteration (iteration === 1):
+   *   1. Manager reads Task.md, provides initial planning
+   *   2. Worker executes with Manager's planning + Task.md
+   *   3. Store Worker output for next iteration
+   *
+   * Subsequent iterations (iteration > 1):
+   *   1. Manager evaluates (Task.md + previous Worker output) FIRST
+   *   2. If Manager calls task_done → return completed (END)
+   *   3. If not complete → Manager provides next instructions
+   *   4. Worker executes with Manager's instructions + Task.md
+   *   5. Store Worker output for next iteration
+   *
+   * @param taskMdContent - Full Task.md content
+   * @param iteration - Current iteration number
+   * @returns Object containing completion status
+   */
+  private async processIteration(
+    taskMdContent: string,
+    iteration: number
+  ): Promise<{ completed: boolean }> {
+    const manager = new Manager(this.managerConfig);
+    const worker = new Worker(this.workerConfig);
+    await manager.initialize();
+    await worker.initialize();
+
+    logger.debug({ iteration }, 'Processing iteration');
+
+    try {
+      if (iteration === 1) {
+        // === FIRST ITERATION: Manager planning → Worker execution ===
+
+        // Step 1: Manager provides initial planning
+        const planningPrompt = this.buildPlanningPrompt(taskMdContent);
+        const { messages: managerMessages, output: managerOutput } =
+          await this.queryManager(manager, planningPrompt, iteration);
+
+        // Save task plan on first iteration
+        await this.saveTaskPlanIfNeeded(managerOutput, iteration);
+
+        // Step 2: Check if Manager somehow completed (unlikely for first iteration)
+        const completion = this.detectCompletion(managerMessages);
+        if (completion?.completed) {
+          logger.info({ iteration }, 'Task completed on first iteration (unexpected)');
+          return { completed: true };
+        }
+
+        // Step 3: Worker executes with Manager's planning
+        const workerPrompt = this.buildWorkerPrompt(taskMdContent, managerOutput);
+        const workerOutput = await this.executeWorker(worker, workerPrompt);
+
+        // Store Worker output for next iteration
+        this.previousWorkerOutput = workerOutput;
+
+        return { completed: false };
+
+      } else {
+        // === SUBSEQUENT ITERATIONS: Manager evaluates FIRST ===
+
+        // Step 1: Manager evaluates (Task.md + previous Worker output)
+        const evaluationPrompt = this.buildEvaluationPrompt(
+          taskMdContent,
+          this.previousWorkerOutput || '',
+          iteration
+        );
+        const { completed, output: managerOutput } =
+          await this.queryManager(manager, evaluationPrompt, iteration);
+
+        // Step 2: Check if Manager signaled completion
+        if (completed) {
+          logger.info({ iteration }, 'Task completed via task_done');
+          return { completed: true };
+        }
+
+        // Step 3: Worker executes with Manager's new instructions
+        const workerPrompt = this.buildWorkerPrompt(taskMdContent, managerOutput);
+        const workerOutput = await this.executeWorker(worker, workerPrompt);
+
+        // Store Worker output for next iteration
+        this.previousWorkerOutput = workerOutput;
+
+        return { completed: false };
+      }
+
+    } finally {
+      // Cleanup this iteration's instances
+      manager.cleanup();
+      worker.cleanup();
+    }
+  }
+
+  /**
+   * Run a dialogue loop with Manager-First flow.
+   *
+   * NEW Manager-First Flow:
+   * 1. First iteration: Manager reads Task.md, provides planning → Worker executes
+   * 2. Subsequent iterations: Manager evaluates (Task.md + Worker output) FIRST
+   *    - If complete → task_done → END
+   *    - If not complete → Manager provides instructions → Worker executes
+   * 3. Loop until Manager calls task_done
    *
    * @param taskPath - Path to Task.md file
    * @param originalRequest - Original user request text
-   * @param chatId - Feishu chat ID
-   * @param messageId - Unique message ID for session management (each task has its own session)
+   * @param chatId - Feishu chat ID (unused, reserved for future)
+   * @param _messageId - Unique message ID (unused, reserved for future)
    * @returns Async iterable of messages from manager agent (to show user)
    */
   async *runDialogue(
@@ -803,35 +677,25 @@ Suggestions:
     this.taskPlanSaved = false;
 
     const taskMdContent = await fs.readFile(taskPath, 'utf-8');
-    const executionInstruction = this.buildExecutionInstruction();
-    let currentPrompt = `${taskMdContent}
-
----
-
-${executionInstruction}`;
     let iteration = 0;
     let taskCompleted = false;
 
     logger.info(
       { taskId: this.taskId, chatId, maxIterations: this.maxIterations },
-      'Starting Flow 2: Worker first, SDK "result" type signals completion'
+      'Starting Manager-First dialogue flow'
     );
 
-    // Main dialogue loop: Worker → Manager → Worker → ...
+    // Main dialogue loop: Manager → Worker → Manager → Worker → ...
     while (iteration < this.maxIterations) {
       iteration++;
 
-      const result = await this.processIteration(currentPrompt, taskMdContent, iteration);
+      const result = await this.processIteration(taskMdContent, iteration);
 
       if (result.completed) {
         taskCompleted = true;
         break;
       }
-
-      // Continue to next iteration with new prompt
-      if (result.nextPrompt) {
-        currentPrompt = result.nextPrompt;
-      }
+      // No nextPrompt needed - Manager always leads
     }
 
     // Warn if max iterations reached without completion

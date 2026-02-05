@@ -72,6 +72,56 @@ async function sendMessageToFeishu(
 }
 
 /**
+ * Check if content is a valid Feishu interactive card structure.
+ * Valid cards must have: config, header (with title), and elements array.
+ *
+ * @param content - Object to validate
+ * @returns true if valid Feishu card structure
+ */
+function isValidFeishuCard(content: Record<string, unknown>): boolean {
+  return (
+    typeof content === 'object' &&
+    content !== null &&
+    'config' in content &&
+    'header' in content &&
+    'elements' in content &&
+    Array.isArray(content.elements) &&
+    typeof content.header === 'object' &&
+    content.header !== null &&
+    'title' in content.header
+  );
+}
+
+/**
+ * Build a simple Feishu card from Markdown text content.
+ * Creates a minimal valid card structure with a single markdown element.
+ *
+ * Reference: src/feishu/write-card-builder.ts
+ *
+ * @param markdownContent - Markdown text to display
+ * @param title - Optional card title (default: 'Assistant')
+ * @returns Valid Feishu card structure
+ */
+function buildMarkdownCard(markdownContent: string, title = 'Assistant'): Record<string, unknown> {
+  return {
+    config: { wide_screen_mode: true },
+    header: {
+      title: {
+        tag: 'plain_text',
+        content: title,
+      },
+      template: 'blue',
+    },
+    elements: [
+      {
+        tag: 'markdown',
+        content: markdownContent,
+      },
+    ],
+  };
+}
+
+/**
  * Tool: Send user feedback (unified text/card message)
  *
  * This tool allows agents to send messages directly to Feishu chats.
@@ -161,11 +211,22 @@ export async function send_user_feedback(params: {
         message: textContent
       }, 'User feedback sent (text)');
     } else {
-      // Send as interactive card
-      const cardContent = typeof content === 'object' ? content : { text: content };
-      await sendMessageToFeishu(client, chatId, 'interactive', JSON.stringify(cardContent));
-
-      logger.debug({ chatId }, 'User card sent (interactive)');
+      // Card format: validate before sending
+      if (typeof content === 'object' && isValidFeishuCard(content)) {
+        // Valid card - send as-is
+        await sendMessageToFeishu(client, chatId, 'interactive', JSON.stringify(content));
+        logger.debug({ chatId, hasValidStructure: true }, 'User card sent (interactive)');
+      } else if (typeof content === 'string') {
+        // String content - convert to valid markdown card
+        const card = buildMarkdownCard(content);
+        await sendMessageToFeishu(client, chatId, 'interactive', JSON.stringify(card));
+        logger.debug({ chatId, contentLength: content.length }, 'User markdown card sent (converted)');
+      } else {
+        // Invalid object - fallback to text message
+        const fallbackText = JSON.stringify(content, null, 2);
+        await sendMessageToFeishu(client, chatId, 'text', JSON.stringify({ text: fallbackText }));
+        logger.warn({ chatId, reason: 'invalid_card_structure' }, 'Invalid card format, sent as text instead');
+      }
     }
 
     // Notify callback that a message was sent (for dialogue bridge tracking)

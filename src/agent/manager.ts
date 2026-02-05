@@ -20,7 +20,7 @@
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { parseSDKMessage, buildSdkEnv } from '../utils/sdk.js';
 import { Config } from '../config/index.js';
-import type { AgentMessage, SessionInfo } from '../types/agent.js';
+import type { AgentMessage } from '../types/agent.js';
 import { feishuSdkMcpServer } from '../mcp/feishu-context-mcp.js';
 import { createLogger } from '../utils/logger.js';
 import { loadSkill, type ParsedSkill } from './skill-loader.js';
@@ -54,7 +54,6 @@ export class Manager {
   readonly model: string;
   readonly apiBaseUrl: string | undefined;
   readonly permissionMode: PermissionMode;
-  private currentSessionId?: string;
   private customSystemPrompt?: string;
   private skill?: ParsedSkill;
   private initialized = false;
@@ -118,13 +117,13 @@ export class Manager {
    * Create SDK options for manager agent.
    * Tool configuration comes from the skill file.
    */
-  private createSdkOptions(resume?: string): Record<string, unknown> {
+  private createSdkOptions(): Record<string, unknown> {
     // Tool configuration from skill file
     const allowedTools = this.skill?.allowedTools || [
       'WebSearch',             // For information lookup
       'send_user_feedback',    // Send text messages to user
       'send_user_card',        // Send rich interactive cards
-      'send_complete',         // Signal task completion
+      'task_done',             // Signal task completion
       'send_file_to_feishu',   // Send files to user
     ];
 
@@ -152,13 +151,6 @@ export class Manager {
       sdkOptions.model = this.model;
     }
 
-    // Resume session
-    if (resume) {
-      sdkOptions.resume = resume;
-    } else if (this.currentSessionId) {
-      sdkOptions.resume = this.currentSessionId;
-    }
-
     return sdkOptions;
   }
 
@@ -181,16 +173,16 @@ ${userPrompt}`;
   /**
    * Stream agent response.
    */
-  async *queryStream(prompt: string, sessionId?: string): AsyncIterable<AgentMessage> {
+  async *queryStream(prompt: string): AsyncIterable<AgentMessage> {
     // Ensure skill is loaded before processing
     if (!this.initialized) {
       await this.initialize();
     }
 
-    this.logger.debug({ sessionId, promptLength: prompt.length }, 'Starting manager query');
+    this.logger.debug({ promptLength: prompt.length }, 'Starting manager query');
 
     try {
-      const sdkOptions = this.createSdkOptions(sessionId);
+      const sdkOptions = this.createSdkOptions();
 
       this.logger.debug({
         customPromptSet: !!this.customSystemPrompt,
@@ -206,10 +198,6 @@ ${userPrompt}`;
 
       for await (const message of queryResult) {
         const parsed = parseSDKMessage(message);
-
-        if (parsed.sessionId) {
-          this.currentSessionId = parsed.sessionId;
-        }
 
         if (!parsed.content) {
           continue;
@@ -233,35 +221,13 @@ ${userPrompt}`;
   }
 
   /**
-   * Get session info.
-   */
-  getSessionInfo(): SessionInfo {
-    return {
-      sessionId: this.currentSessionId,
-      resume: this.currentSessionId,
-    };
-  }
-
-  /**
-   * Cleanup resources and clear session.
+   * Cleanup resources.
    *
    * Call this method when the agent is no longer needed to:
-   * - Clear session ID to release SDK resources
    * - Clear custom system prompt
-   * - Allow SDK to clean up MCP server instances associated with the session
-   *
-   * **Memory Management:**
-   * - Session IDs are cleared, allowing SDK to release conversation context
-   * - MCP server instances (feishu-context) are managed by the SDK lifecycle
-   * - The feishuSdkMcpServer singleton is created once per process and reused
-   * - SDK handles cleanup of per-query MCP server instances automatically
-   *
-   * Note: The feishuSdkMcpServer is a module-level singleton and intentionally
-   * not cleaned up here. It persists for the lifetime of the process.
    */
   cleanup(): void {
-    this.logger.debug({ sessionId: this.currentSessionId }, 'Cleaning up Manager agent');
-    this.currentSessionId = undefined;
+    this.logger.debug('Cleaning up Manager agent');
     this.customSystemPrompt = undefined;
   }
 }

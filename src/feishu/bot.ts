@@ -5,14 +5,13 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import { EventEmitter } from 'events';
 import * as fs from 'fs/promises';
 import * as path from 'path';
-import { extractText, Planner, Manager, Worker, AgentDialogueBridge } from '../agent/index.js';
+import { extractText, Planner, AgentDialogueBridge } from '../agent/index.js';
 import type { TaskPlanData } from '../agent/dialogue-bridge.js';
 import { Config } from '../config/index.js';
 import { DEDUPLICATION } from '../config/constants.js';
 import { FeishuOutputAdapter } from '../utils/output-adapter.js';
 import { TaskTracker, type DialogueTaskPlan } from '../utils/task-tracker.js';
 import { LongTaskManager } from '../long-task/index.js';
-import type { SessionManager } from './session.js';
 import { buildTextContent } from './content-builder.js';
 import { createLogger } from '../utils/logger.js';
 import { handleError, ErrorCategory } from '../utils/error-handler.js';
@@ -64,7 +63,6 @@ import { messageHistoryManager } from './message-history.js';
 export class FeishuBot extends EventEmitter {
   readonly appId: string;
   readonly appSecret: string;
-  readonly sessionManager: SessionManager;
 
   private client?: lark.Client;
   private wsClient?: lark.WSClient;
@@ -88,13 +86,11 @@ export class FeishuBot extends EventEmitter {
 
   constructor(
     appId: string,
-    appSecret: string,
-    sessionManager: SessionManager
+    appSecret: string
   ) {
     super();
     this.appId = appId;
     this.appSecret = appSecret;
-    this.sessionManager = sessionManager;
     this.taskTracker = new TaskTracker();
   }
 
@@ -289,29 +285,23 @@ export class FeishuBot extends EventEmitter {
     }
 
     // === FLOW 2: Execute dialogue ===
-    // Create agents
-    const manager = new Manager({
-      apiKey: agentConfig.apiKey,
-      model: agentConfig.model,
-      apiBaseUrl: agentConfig.apiBaseUrl,
-      permissionMode: 'bypassPermissions',
-    });
-    await manager.initialize();
-
-    const worker = new Worker({
-      apiKey: agentConfig.apiKey,
-      model: agentConfig.model,
-      apiBaseUrl: agentConfig.apiBaseUrl,
-    });
-    await worker.initialize();
-
+    // The bridge will create fresh Manager/Worker instances per iteration
     // Import MCP tools to set message tracking callback
     const { setMessageSentCallback } = await import('../mcp/feishu-context-mcp.js');
 
-    // Create bridge with task plan callback
+    // Create bridge with agent configs (not instances)
     const bridge = new AgentDialogueBridge({
-      manager,
-      worker,
+      managerConfig: {
+        apiKey: agentConfig.apiKey,
+        model: agentConfig.model,
+        apiBaseUrl: agentConfig.apiBaseUrl,
+        permissionMode: 'bypassPermissions',
+      },
+      workerConfig: {
+        apiKey: agentConfig.apiKey,
+        model: agentConfig.model,
+        apiBaseUrl: agentConfig.apiBaseUrl,
+      },
       onTaskPlanGenerated: async (plan: TaskPlanData) => {
         await this.taskTracker.saveDialogueTaskPlan(plan as DialogueTaskPlan);
       },
@@ -790,7 +780,6 @@ export class FeishuBot extends EventEmitter {
       const commandContext: CommandHandlerContext = {
         chatId: chat_id,
         sendMessage: this.sendMessage.bind(this),
-        sessionManager: this.sessionManager,
         longTaskManagers: this.longTaskManagers,
       };
 
