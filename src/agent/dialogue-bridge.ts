@@ -343,7 +343,7 @@ Suggestions:
   /**
    * Build planning prompt for Manager (first iteration).
    *
-   * Manager reads Task.md and provides initial planning/instructions for Worker.
+   * Manager reads Task.md and identifies the PRIMARY GOAL - no detailed planning.
    *
    * @param taskMdContent - Full Task.md content
    * @returns Planning prompt for Manager
@@ -355,29 +355,35 @@ Suggestions:
 
 ## Your Task
 
-You are the **Manager**. This is the **first iteration** - you need to provide initial planning for the Worker.
+You are the **Manager**. This is the **first iteration**.
 
 ### Your Role
 
-1. **Analyze the task** - Review the Original Request and Expected Results in Task.md
-2. **Create a plan** - Break down the task into clear steps
-3. **Provide instructions** - Give the Worker specific guidance on what to do first
+Read the task and identify the PRIMARY GOAL - that's all.
+
+### What to Do
+
+1. Read the Original Request in Task.md
+2. Identify the MAIN thing that needs to be accomplished
+3. State this as a SINGLE, CLEAR goal statement
 
 ### What to Provide
 
-Output your planning as clear instructions for the Worker:
-- What should be explored or done first
-- What files to read or create
-- What approach to take
-- Any priorities or considerations
+Just one clear sentence describing what needs to be done:
+- "The goal is to: [明确的目标]"
+- "We need to: [需要完成的事]"
+- "Please: [简洁的要求]"
 
-**IMPORTANT**: Do NOT call task_done yet - this is just the initial planning phase.
-The Worker will execute your instructions, and then you'll evaluate the results in the next iteration.
+**DO NOT**:
+- ❌ Create a plan
+- ❌ Break down steps
+- ❌ Provide detailed instructions
+- ❌ List files or approaches
 
 **Remember**: The user will NOT see your text response. They only see messages sent via send_user_feedback.
-If you want to update the user about your plan, use send_user_feedback first.
+Use send_user_feedback to inform the user about the goal you've identified.
 
-Your planning output will be passed directly to the Worker as their instructions.
+Your output will be passed directly to the Worker as their instruction.
 `;
   }
 
@@ -410,7 +416,7 @@ ${workerOutput}
 
 ## Your Evaluation Task
 
-You are the **Manager**. Worker has completed work based on your previous instructions.
+You are the **Manager**. Worker has completed work based on your previous instruction.
 
 ### Step 1: Evaluate Completion
 
@@ -440,10 +446,14 @@ task_done({
 
 Replace EXTRACT_CHAT_ID_FROM_TASK_MD with the Chat ID value from Task.md.
 
-**If INCOMPLETE** → Provide next instructions for Worker:
-- What still needs to be done
-- What the Worker should focus on next
-- Any corrections or additional requirements
+**If INCOMPLETE** → Identify the remaining issue:
+
+Do NOT provide detailed instructions. Instead:
+- Identify what is STILL MISSING or NOT WORKING
+- Find the MAIN obstacle or incomplete part
+- State this as a single clear goal for the Worker
+
+The Worker will figure out HOW to solve it. You just identify WHAT needs to be done.
 
 **IMPORTANT**: The user will NOT see your text response. They only see messages sent via send_user_feedback.
 

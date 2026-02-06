@@ -58,6 +58,15 @@ import { messageHistoryManager } from './message-history.js';
 // }
 
 /**
+ * Pending message in the chat queue.
+ */
+interface PendingMessage {
+  text: string;
+  messageId: string;
+  timestamp: number;
+}
+
+/**
  * Feishu/Lark bot using WebSocket.
  */
 export class FeishuBot extends EventEmitter {
@@ -83,6 +92,11 @@ export class FeishuBot extends EventEmitter {
 
   // Active dialogue bridges per chat
   private activeDialogues = new Map<string, AgentDialogueBridge>();
+
+  // Per-chatId message queues for streaming sessions
+  private chatQueues = new Map<string, PendingMessage[]>();
+  private queueReadyCallbacks = new Map<string, () => void>();
+  private activeStreams = new Map<string, Promise<void>>();
 
   constructor(
     appId: string,
@@ -409,6 +423,129 @@ export class FeishuBot extends EventEmitter {
       // Clean up bridge reference
       this.activeDialogues.delete(chatId);
     }
+  }
+
+  /**
+   * Handle direct chat mode - Simple SDK query without Task.md.
+   * This is the DEFAULT behavior when no command is given.
+   *
+   * Key differences from handleTaskFlow:
+   * - No Planner agent
+   * - No Task.md creation
+   * - No Worker/Manager dialogue loop
+   * - Direct SDK query with session resume
+   *
+   * @param chatId - Feishu chat ID
+   * @param text - User's message text
+   * @param messageId - Unique message identifier for session resume
+   * @returns Accumulated response content
+   */
+  private async handleDirectChat(
+    chatId: string,
+    text: string,
+    messageId: string
+  ): Promise<string> {
+    // Initialize queue for this chatId (if not exists)
+    if (!this.chatQueues.has(chatId)) {
+      this.chatQueues.set(chatId, []);
+    }
+
+    // Add message to queue
+    const queue = this.chatQueues.get(chatId)!;
+    queue.push({ text, messageId, timestamp: Date.now() });
+
+    // Wake up the waiting generator
+    const callback = this.queueReadyCallbacks.get(chatId);
+    if (callback) {
+      callback();
+    }
+
+    // Start streaming processing (if not already running)
+    // Coroutine runs forever, does not auto-exit
+    if (!this.activeStreams.has(chatId)) {
+      const streamPromise = this.runStreamingChat(chatId);
+      this.activeStreams.set(chatId, streamPromise);
+
+      // Only clean up on error, normally never ends
+      streamPromise.catch((err) => {
+        this.logger.error({ err, chatId }, 'Stream error, will restart on next message');
+        this.activeStreams.delete(chatId);
+      });
+    }
+
+    return '';
+  }
+
+  /**
+   * Run streaming chat for a specific chatId.
+   * This method creates a persistent coroutine that waits for messages in the queue
+   * and sends them to the SDK. The coroutine runs forever until an error occurs.
+   *
+   * @param chatId - Feishu chat ID
+   */
+  private async runStreamingChat(chatId: string): Promise<void> {
+    // Create async generator for SDK use
+    // Note: This generator never ends, always waits for new messages
+    async function* messageGenerator(
+      getQueue: () => PendingMessage[],
+      waitForMessage: () => Promise<void>
+    ) {
+      while (true) {  // Infinite loop, coroutine never exits
+        const queue = getQueue();
+        if (queue.length > 0) {
+          const msg = queue.shift()!;
+          yield {
+            type: 'user',
+            parent_tool_use_id: null,
+            session_id: null,
+            message: {
+              role: 'user',
+              content: msg.text,
+            },
+          } as const;
+        } else {
+          // Wait for new message when queue is empty, do not exit
+          await waitForMessage();
+        }
+      }
+    }
+
+    // Promise that resolves when a new message arrives
+    const waitForMessage = () =>
+      new Promise<void>(resolve => {
+        this.queueReadyCallbacks.set(chatId, resolve);
+      });
+
+    const generator = messageGenerator(
+      () => this.chatQueues.get(chatId) || [],
+      waitForMessage
+    );
+
+    // Configure SDK
+    const { query } = await import('@anthropic-ai/claude-agent-sdk');
+    const { createAgentSdkOptions, parseSDKMessage } = await import('../utils/sdk.js');
+    const agentConfig = Config.getAgentConfig();
+
+    const sdkOptions = createAgentSdkOptions({
+      apiKey: agentConfig.apiKey,
+      model: agentConfig.model,
+      apiBaseUrl: agentConfig.apiBaseUrl,
+      permissionMode: 'bypassPermissions',
+    });
+
+    this.logger.info({ chatId }, 'Starting streaming chat');
+
+    // Start streaming query - runs forever, never ends
+    // Type assertion: generator matches SDK input format
+    for await (const message of query({ prompt: generator as any, options: sdkOptions })) {
+      const parsed = parseSDKMessage(message);
+      if (parsed.content) {
+        await this.sendMessage(chatId, parsed.content);
+      }
+    }
+
+    // Theoretically never reaches here, unless a serious error occurs
+    this.logger.warn({ chatId }, 'Streaming chat ended unexpectedly');
   }
 
   /**
@@ -795,6 +932,18 @@ export class FeishuBot extends EventEmitter {
         return;
       }
 
+      // Handle special case for /task command (needs additional logic)
+      if (text.trim().startsWith('/task ')) {
+        const taskText = text.trim().substring(6).trim();
+        await CommandHandlers.handleTaskCommand(commandContext, taskText);
+
+        if (taskText) {
+          // Use existing task flow (Planner → Task.md → Worker/Manager)
+          await this.handleTaskFlow(chat_id, taskText, message_id, sender);
+        }
+        return;
+      }
+
       // Handle all other commands
       const handled = await CommandHandlers.executeCommand(commandContext, text);
       if (handled) {
@@ -802,20 +951,8 @@ export class FeishuBot extends EventEmitter {
       }
     }
 
-    {
-      // NEW: All non-command messages use Flow 1 → Flow 2 (task flow)
-      // Note: handleTaskFlow already creates Task.md via Planner,
-      // so we don't use saveTaskRecord here to avoid overwriting it with old format
-      await this.handleTaskFlow(
-        chat_id,
-        text,
-        message_id,
-        sender
-      );
-
-      // Task.md is already created by Planner in handleTaskFlow
-      // No need to save separate task record - the Task.md file serves as the record
-    }
+    // DEFAULT: Direct chat mode (no Task.md, no Planner, just SDK query)
+    await this.handleDirectChat(chat_id, text, message_id);
   }
 
   /**

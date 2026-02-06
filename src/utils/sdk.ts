@@ -24,8 +24,6 @@ export interface CreateAgentSdkOptionsParams {
   cwd?: string;
   /** Permission mode for tool execution */
   permissionMode?: 'default' | 'bypassPermissions';
-  /** Optional session ID to resume */
-  resume?: string;
 }
 
 /**
@@ -51,7 +49,6 @@ export function createAgentSdkOptions(params: CreateAgentSdkOptionsParams): Reco
     apiBaseUrl,
     cwd = Config.getWorkspaceDir(),
     permissionMode = 'bypassPermissions',
-    resume,
   } = params;
 
   // Get node bin directory for PATH - needed for SDK subprocess spawning
@@ -89,11 +86,6 @@ export function createAgentSdkOptions(params: CreateAgentSdkOptionsParams): Reco
   // Set base URL if using custom endpoint (e.g., GLM)
   if (apiBaseUrl) {
     (sdkOptions.env as Record<string, string>).ANTHROPIC_BASE_URL = apiBaseUrl;
-  }
-
-  // Resume session if provided
-  if (resume) {
-    sdkOptions.resume = resume;
   }
 
   return sdkOptions;

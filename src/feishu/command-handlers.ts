@@ -20,32 +20,6 @@ export interface CommandHandlerContext {
 }
 
 /**
- * Handle /reset command - clear conversation history
- */
-export async function handleResetCommand(
-  context: CommandHandlerContext
-): Promise<void> {
-  const { chatId, sendMessage } = context;
-
-  logger.info({ chatId }, 'Reset command triggered');
-
-  try {
-    // Sessions are no longer tracked - each task is independent
-    await sendMessage(
-      chatId,
-      '✅ Each conversation is independent. Just send a new message to start fresh.'
-    );
-  } catch (error) {
-    logger.error({ err: error, chatId }, 'Failed to send reset response');
-
-    await sendMessage(
-      chatId,
-      '❌ Failed to process reset command. Please try again.'
-    );
-  }
-}
-
-/**
  * Handle /status command - show current task status
  */
 export async function handleStatusCommand(
@@ -75,7 +49,7 @@ export async function handleStatusCommand(
         statusMessage += '⚠️ No long task is currently running.';
       }
     } else {
-      statusMessage += '⚠️ No long task is currently running.\n\n💡 Regular tasks run independently and don\'t have persistent status.';
+      statusMessage += '⚠️ No long task is currently running.\n\n💡 Regular tasks run independently and don\'t have persistent status.\n\n📝 **Current Mode**: Direct chat (default)';
     }
 
     await sendMessage(chatId, statusMessage);
@@ -102,32 +76,61 @@ export async function handleHelpCommand(
   const helpMessage = `📖 **Help & Commands**
 
 **Available Commands:**
-• /reset - Clear conversation history
 • /status - Show session and task status
 • /help - Show this help message
+• /cancel - Cancel running long task
+
+**Task Mode (Structured):**
+• /task <task> - Use Planner + Worker/Manager agents (creates Task.md)
 
 **Long Task Mode:**
 • /long <task> - Start long task workflow (24h timeout, multi-step)
-• /cancel - Cancel running long task
 
-**Task Mode (Default):**
-• All messages use dual-agent mode (Worker + Manager)
+**Agent Commands:**
+• /reset - Reset conversation (handled by Claude agent)
+
+**Direct Chat (Default):**
+• Any message without commands - Quick chat with Claude SDK
 
 **Examples:**
 \`\`\`
-Analyze the authentication system
+What's the weather today?
+/task Analyze the authentication system
 /long Refactor user module with tests
 /reset
 \`\`\`
 
 **How It Works:**
-1. Your message creates a Task.md file
-2. Worker explores and executes
-3. Manager evaluates and plans
-4. Loop continues until task is complete
+• **Direct chat**: Fast responses, conversation context maintained
+• **/task mode**: Structured planning with Task.md, Worker + Manager dialogue
+• **/long mode**: Multi-step long-running tasks (24h timeout)
+• **/reset**: Clears conversation history (handled by the agent)
 `;
 
   await sendMessage(chatId, helpMessage);
+}
+
+/**
+ * Handle /task command - start structured task workflow (Planner + Worker/Manager)
+ */
+export async function handleTaskCommand(
+  context: CommandHandlerContext,
+  userRequest: string
+): Promise<void> {
+  const { chatId, sendMessage } = context;
+
+  logger.info({ chatId, task: userRequest }, 'Task command triggered');
+
+  if (!userRequest) {
+    await sendMessage(
+      chatId,
+      '⚠️ Usage: `/task <your task description>`\n\nExample: `/task Analyze the authentication system`'
+    );
+    return;
+  }
+
+  // Return success - caller will handle the task flow
+  // This keeps the module clean by avoiding Config imports
 }
 
 /**
@@ -199,15 +202,16 @@ export async function handleCancelCommand(
 
 /**
  * Check if text is a command
+ * Note: /reset is NOT handled here - it's passed to the agent SDK
  */
 export function isCommand(text: string): boolean {
   const trimmed = text.trim();
   return (
-    trimmed === '/reset' ||
     trimmed === '/status' ||
     trimmed === '/help' ||
     trimmed === '/cancel' ||
-    trimmed.startsWith('/long ')
+    trimmed.startsWith('/long ') ||
+    trimmed.startsWith('/task ')
   );
 }
 
@@ -240,6 +244,7 @@ export function parseCommand(text: string): {
  * Execute command
  *
  * Returns true if command was handled, false otherwise
+ * Note: /reset is passed to the agent SDK, not handled here
  */
 export async function executeCommand(
   context: CommandHandlerContext,
@@ -248,11 +253,6 @@ export async function executeCommand(
   const trimmed = text.trim();
 
   // Handle simple commands
-  if (trimmed === '/reset') {
-    await handleResetCommand(context);
-    return true;
-  }
-
   if (trimmed === '/status') {
     await handleStatusCommand(context);
     return true;
@@ -269,6 +269,12 @@ export async function executeCommand(
   }
 
   // Handle commands with arguments
+  if (trimmed.startsWith('/task ')) {
+    const args = trimmed.substring(6).trim();
+    await handleTaskCommand(context, args);
+    return true;
+  }
+
   if (trimmed.startsWith('/long ')) {
     const args = trimmed.substring(6).trim();
     await handleLongTaskCommand(context, args);
