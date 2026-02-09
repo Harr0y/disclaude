@@ -381,43 +381,6 @@ export class IterationBridge {
   }
 
   /**
-   * Legacy method: Run a single iteration and return buffered results.
-   *
-   * @deprecated Use runIterationStreaming() for real-time user feedback.
-   * This method is kept for backward compatibility.
-   */
-  async runIteration(): Promise<IterationResult> {
-    logger.info({ iteration: this.iteration }, 'Using LEGACY buffered runIteration (deprecated)');
-
-    const messages: AgentMessage[] = [];
-    const managerOutputBuf: string[] = [];
-
-    // Collect all messages from the streaming version
-    for await (const msg of this.runIterationStreaming()) {
-      messages.push(msg);
-
-      // Collect text from non-tool messages (Manager output)
-      if (msg.messageType !== 'tool_use') {
-        const text = extractText(msg);
-        if (text) {
-          managerOutputBuf.push(text);
-        }
-      }
-    }
-
-    // Worker output is in the queue
-    const workerOutput = this.collectWorkerResults();
-
-    return {
-      messages,
-      workerOutput,
-      managerOutput: managerOutputBuf.join(''),
-      workerComplete: this.workerDone,
-      taskDone: this.taskDoneSignaled,
-    };
-  }
-
-  /**
    * Evaluate task completion using Evaluator.
    *
    * Phase 1: Evaluator assesses whether the task is complete.

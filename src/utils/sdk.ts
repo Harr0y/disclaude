@@ -107,16 +107,6 @@ function safeStringify(obj: unknown, maxLength: number = 100): string {
 }
 
 /**
- * Extract text from SDK message.
- * Handles both assistant messages (streaming responses) and error messages.
- * @deprecated Use parseSDKMessage() for enhanced message type support.
- */
-export function extractTextFromSDKMessage(message: SDKMessage): string {
-  const parsed = parseSDKMessage(message);
-  return parsed.content;
-}
-
-/**
  * Format tool input for display, showing intent rather than raw parameters.
  */
 function formatToolInput(toolName: string, input: Record<string, unknown> | undefined): string {

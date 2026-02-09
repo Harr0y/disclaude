@@ -75,15 +75,6 @@ export interface LoggingConfig {
 }
 
 /**
- * @deprecated Skills are loaded from package installation directory.
- * This interface is kept for config file compatibility only.
- */
-export interface SkillsConfig {
-  /** @deprecated Not used - skills are loaded from package directory */
-  dir?: string;
-}
-
-/**
  * Tools configuration section.
  */
 export interface ToolsConfig {
@@ -122,8 +113,6 @@ export interface DisclaudeConfig {
   logging?: LoggingConfig;
   /** Tool configuration */
   tools?: ToolsConfig;
-  /** @deprecated Skills are loaded from package directory */
-  skills?: SkillsConfig;
 }
 
 /**
