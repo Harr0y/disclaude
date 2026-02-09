@@ -42,6 +42,8 @@ import type { AgentMessage, AgentInput } from '../types/agent.js';
 import { createLogger } from '../utils/logger.js';
 import { loadSkill, type ParsedSkill } from './skill-loader.js';
 
+const logger = createLogger('Evaluator');
+
 /**
  * Input type for Evaluator queries.
  */
@@ -131,6 +133,7 @@ export class Evaluator {
       chatId: z.string().describe('Feishu chat ID (get this from the task context/metadata)'),
       taskId: z.string().optional().describe('Optional task ID for tracking'),
     },
+    // eslint-disable-next-line require-await
     async ({ chatId, taskId }) => {
       this.logger.info({
         chatId,
@@ -263,7 +266,7 @@ export class Evaluator {
               confidence: parsed.confidence || 0.5,
             };
           } catch (e) {
-            this.logger.warn({ err: e }, 'Failed to parse evaluation JSON');
+            logger.warn({ err: e }, 'Failed to parse evaluation JSON');
           }
         }
       }

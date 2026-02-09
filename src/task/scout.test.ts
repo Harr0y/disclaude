@@ -36,7 +36,7 @@ vi.mock('../utils/logger.js', () => ({
 
 vi.mock('./skill-loader.js', () => ({
   loadSkill: vi.fn(),
-  buildScoutPrompt: vi.fn((prompt, context, skill) => {
+  buildScoutPrompt: vi.fn((prompt, context, _skill) => {
     return `[Context: ${context.taskPath}]\n${prompt}`;
   }),
 }));

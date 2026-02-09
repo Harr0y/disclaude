@@ -51,5 +51,5 @@ export const FILE_DEDUPLICATION = {
  */
 export const DIALOGUE = {
   /** Maximum number of iterations in the dialogue loop */
-  MAX_ITERATIONS: 3,
+  MAX_ITERATIONS: 20,
 } as const;

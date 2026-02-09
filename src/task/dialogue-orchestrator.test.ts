@@ -11,7 +11,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { DialogueOrchestrator } from './dialogue-orchestrator.js';
 import type { DialogueOrchestratorConfig } from './dialogue-orchestrator.js';
-import type { ManagerConfig } from './manager.js';
+import type { EvaluatorConfig } from './evaluator.js';
 import type { WorkerConfig } from './worker.js';
 
 // Mock dependencies
@@ -60,25 +60,33 @@ vi.mock('../utils/logger.js', () => ({
 describe('DialogueOrchestrator', () => {
   let orchestrator: DialogueOrchestrator;
   let config: DialogueOrchestratorConfig;
-  let managerConfig: ManagerConfig;
-  let workerConfig: WorkerConfig;
+  let evaluatorConfig: EvaluatorConfig;
+  let plannerConfig: { apiKey: string; model: string };
 
   beforeEach(() => {
     vi.clearAllMocks();
 
-    managerConfig = {
-      apiKey: 'test-manager-key',
+    evaluatorConfig = {
+      apiKey: 'test-evaluator-key',
       model: 'claude-3-5-sonnet-20241022',
     };
 
-    workerConfig = {
-      apiKey: 'test-worker-key',
+    plannerConfig = {
+      apiKey: 'test-planner-key',
       model: 'claude-3-5-sonnet-20241022',
     };
 
     config = {
-      managerConfig,
-      workerConfig,
+      evaluatorConfig,
+      plannerConfig,
+      executorConfig: {
+        apiKey: 'test-executor-key',
+        model: 'claude-3-5-sonnet-20241022',
+        sendMessage: async () => {},
+        sendCard: async () => {},
+        chatId: 'test-chat',
+        workspaceBaseDir: '/workspace',
+      },
     };
 
     orchestrator = new DialogueOrchestrator(config);
@@ -87,8 +95,8 @@ describe('DialogueOrchestrator', () => {
   describe('constructor', () => {
     it('should create orchestrator with config', () => {
       expect(orchestrator).toBeInstanceOf(DialogueOrchestrator);
-      expect(orchestrator.managerConfig).toBe(managerConfig);
-      expect(orchestrator.workerConfig).toBe(workerConfig);
+      expect(orchestrator.evaluatorConfig).toBe(evaluatorConfig);
+      expect(orchestrator.plannerConfig).toBe(plannerConfig);
     });
 
     it('should set max iterations from constants', () => {

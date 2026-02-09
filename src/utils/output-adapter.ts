@@ -214,7 +214,7 @@ export class FeishuOutputAdapter implements OutputAdapter {
     // Check if file matches any of the configured patterns
     const matchesPattern = this.fileAttachmentConfig.patterns.some(pattern => {
       // Simple glob matching for *-report.md patterns
-      const regex = new RegExp('^' + pattern.replace(/\*/g, '.*').replace(/\?/g, '.') + '$');
+      const regex = new RegExp(`^${pattern.replace(/\*/g, '.*').replace(/\?/g, '.')}$`);
       return regex.test(fileName);
     });
 

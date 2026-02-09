@@ -1,15 +1,24 @@
 /**
  * Agent module exports.
  *
- * Architecture:
+ * Architecture (Plan-and-Execute):
  * - Scout: Task initialization - creates Task.md with metadata
  * - Evaluator: Task completion evaluation
- * - Worker: Task execution with full tool access
- * - DialogueOrchestrator: Manages direct Evaluator-Worker flow
+ * - Worker: Simple task execution
+ * - TaskPlanner: Breaks down complex tasks into subtasks
+ * - SubtaskExecutor: Executes individual subtasks
+ * - DialogueOrchestrator: Manages direct Evaluator-Planner/Executor flow
  *
  * Complete Workflow:
  * Flow 1: User request → Scout → Task.md (metadata + original request)
- * Flow 2: Task.md → Evaluator → Worker → ...
+ * Flow 2: Task.md → Evaluator → Planner/Executor (plan + execute) → ...
+ *
+ * Plan-and-Execute Flow:
+ * - TaskPlanner breaks down complex tasks into subtasks
+ * - For simple tasks: Worker executes directly
+ * - For complex tasks: SubtaskExecutor runs each subtask with fresh Worker instances
+ * - Sequential handoff with context passing
+ * - Results aggregated for final output
  *
  * Session Management:
  * - Orchestrator internally manages sessions per messageId
@@ -18,8 +27,10 @@
 
 // Core agents
 export { Scout } from './scout.js';
-export { Worker } from './worker.js';
+export { Worker, type WorkerConfig } from './worker.js';
 export { Evaluator } from './evaluator.js';
+
+// Note: WorkerEnhanced has been removed - replaced by direct use of TaskPlanner + SubtaskExecutor
 
 // Bridges
 export {
@@ -49,4 +60,4 @@ export {
 // and is not exported from the Feishu MCP server anymore
 
 // Utility
-export { extractText } from './evaluator.js';
+export { extractText } from '../utils/sdk.js';

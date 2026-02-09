@@ -19,7 +19,7 @@ This is a task to analyze the codebase.`;
     });
 
     it('should default to Untitled Task when no header found', () => {
-      const output = `This is just some text without headers.`;
+      const output = 'This is just some text without headers.';
       const result = extractor.extract(output, 'test');
 
       expect(result?.title).toBe('Untitled Task');

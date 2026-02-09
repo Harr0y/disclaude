@@ -86,20 +86,32 @@ async function executeOnce(
   } catch {
     throw new Error(
       `Scout failed to create Task.md at ${taskPath}. ` +
-      `The model may not have called the Write tool. ` +
-      `Please check if the model supports tool calling properly.`
+        'The model may not have called the Write tool. ' +
+        'Please check if the model supports tool calling properly.'
     );
   }
 
   logger.info({ taskPath }, 'Task.md created by Scout');
 
   // === FLOW 2: Create dialogue bridge ===
-  // The bridge will create fresh Evaluator/Worker instances per iteration
+  // The bridge will create fresh Evaluator/Planner/Executor instances per iteration
+  const sendToFeishu = feishuChatId ? createFeishuSender() : async (_chatId: string, _msg: string) => {};
+  const sendCardToFeishu = feishuChatId ? createFeishuCardSender() : async (_chatId: string, _card: Record<string, unknown>) => {};
+
   const bridge = new DialogueOrchestrator({
-    workerConfig: {
+    plannerConfig: {
       apiKey: agentConfig.apiKey,
       model: agentConfig.model,
       apiBaseUrl: agentConfig.apiBaseUrl,
+    },
+    executorConfig: {
+      apiKey: agentConfig.apiKey,
+      model: agentConfig.model,
+      apiBaseUrl: agentConfig.apiBaseUrl,
+      sendMessage: sendToFeishu,
+      sendCard: sendCardToFeishu,
+      chatId,
+      workspaceBaseDir: Config.getWorkspaceDir(),
     },
     evaluatorConfig: {
       apiKey: agentConfig.apiKey,

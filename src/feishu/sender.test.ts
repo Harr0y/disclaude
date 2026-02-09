@@ -167,7 +167,7 @@ describe('Feishu Sender', () => {
 
       try {
         await sender('oc_chat123', 'Test message');
-      } catch (e) {
+      } catch {
         // Expected to throw
       }
 
@@ -233,10 +233,9 @@ describe('Feishu Sender', () => {
 
       await sender('oc_chat123', card);
 
-      const callArgs = mockClientInstance.im.message.create.mock.calls[0];
-      const contentArg = callArgs[0].data.content;
+      const [{ data: { content } }] = mockClientInstance.im.message.create.mock.calls[0];
 
-      expect(JSON.parse(contentArg)).toEqual(card);
+      expect(JSON.parse(content)).toEqual(card);
     });
 
     it('should handle card send errors', async () => {
@@ -260,7 +259,7 @@ describe('Feishu Sender', () => {
 
       try {
         await sender('oc_chat123', { config: {} });
-      } catch (e) {
+      } catch {
         // Expected to throw
       }
 

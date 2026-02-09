@@ -89,7 +89,7 @@ describe('AttachmentManager', () => {
 
       manager.addAttachment('oc_chat123', attachment);
 
-      const retrieved = manager.getAttachments('oc_chat123')[0];
+      const [retrieved] = manager.getAttachments('oc_chat123');
 
       expect(retrieved).toEqual(attachment);
     });

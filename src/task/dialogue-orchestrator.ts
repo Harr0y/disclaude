@@ -1,10 +1,10 @@
 /**
- * DialogueOrchestrator - Manages streaming dialogue with direct Evaluator → Worker flow.
+ * DialogueOrchestrator - Manages streaming dialogue with Plan-and-Execute architecture.
  *
- * ## Architecture: Direct Evaluator-Worker Flow (P0)
+ * ## Architecture: Plan-and-Execute (P0)
  *
  * - Phase 1: Evaluator evaluates task completion
- * - Phase 2: Worker executes with Evaluator's feedback
+ * - Phase 2: Planner/Executor executes tasks with Evaluator's feedback
  * - Direct architecture: No Manager intermediate layer
  * - Loop continues until max iterations reached or task complete
  *
@@ -15,14 +15,23 @@
  * - 3 agent instances per iteration
  * - Manager as intermediate layer
  *
- * **AFTER (Direct Evaluator-Worker)**:
- * - Evaluator (evaluate) → Worker (execute with Evaluator feedback)
- * - 2 agent instances per iteration
- * - Direct feedback from Evaluator to Worker
+ * **AFTER (Plan-and-Execute)**:
+ * - Evaluator (evaluate) → Planner/Executor (plan + execute with multi-agent relay)
+ * - 2 agent instances per iteration (Evaluator + Worker/Planner+Executor)
+ * - Direct feedback from Evaluator to execution phase
+ *
+ * ## Plan-and-Execute Flow
+ *
+ * - TaskPlanner breaks down complex tasks into subtasks
+ * - SubtaskExecutor executes each subtask with fresh Worker instances
+ * - Simple tasks: Worker executes directly
+ * - Complex tasks: TaskPlanner + SubtaskExecutor coordinate
+ * - Sequential handoff with context passing
+ * - Results aggregated for final output
  *
  * ## No Session State Across Iterations
  *
- * - Each iteration creates FRESH Evaluator and Worker instances via IterationBridge
+ * - Each iteration creates FRESH agent instances via IterationBridge
  * - Context is maintained via previousWorkerOutput storage between iterations
  * - No cross-iteration session IDs needed
  */
@@ -32,8 +41,8 @@ import { createLogger } from '../utils/logger.js';
 import { extractText } from '../utils/sdk.js';
 import * as path from 'path';
 import * as fs from 'fs/promises';
-import type { WorkerConfig } from './worker.js';
 import type { EvaluatorConfig } from './evaluator.js';
+import type { LongTaskConfig } from '../long-task/types.js';
 import { IterationBridge } from './iteration-bridge.js';
 import { TaskPlanExtractor, type TaskPlanData } from '../long-task/task-plan-extractor.js';
 import { DialogueMessageTracker } from './dialogue-message-tracker.js';
@@ -45,33 +54,44 @@ const logger = createLogger('DialogueOrchestrator', {});
  * Dialogue orchestrator configuration.
  */
 export interface DialogueOrchestratorConfig {
-  workerConfig: WorkerConfig;
+  /** Planner configuration for task planning */
+  plannerConfig: {
+    apiKey: string;
+    model: string;
+    apiBaseUrl?: string;
+  };
+  /** Executor configuration for subtask execution */
+  executorConfig: LongTaskConfig;
+  /** Evaluator configuration */
   evaluatorConfig: EvaluatorConfig;
   /** Callback when task plan is generated */
   onTaskPlanGenerated?: (plan: TaskPlanData) => Promise<void>;
 }
 
 /**
- * DialogueOrchestrator - Manages streaming dialogue loop between Manager and Worker.
+ * DialogueOrchestrator - Manages streaming dialogue loop with Plan-and-Execute.
  *
  * Refactored from AgentDialogueBridge to focus on orchestration only.
  * - Task plan extraction delegated to TaskPlanExtractor
  * - Message tracking delegated to DialogueMessageTracker
- * - Uses IterationBridge (formerly StreamBridge) for single iterations
+ * - Uses IterationBridge for single iterations
  *
  * NEW Streaming Flow:
- * 1. Each iteration: Manager and Worker run concurrently via IterationBridge
- * 2. Message channels enable bidirectional communication
- * 3. Manager's output → Worker's input, Worker's output → Manager's input
- * 4. When Worker sends 'result' message, iteration ends
- * 5. Loop continues until max iterations reached
+ * 1. Each iteration: Evaluator and Planner/Executor run via IterationBridge
+ * 2. Evaluator evaluates completion → Planner/Executor plans and executes
+ * 3. For complex tasks: TaskPlanner breaks down → SubtaskExecutor executes subtasks
+ * 4. For simple tasks: Worker executes directly
+ * 5. When execution completes, iteration ends
+ * 6. Loop continues until max iterations reached
  *
- * **User Communication (Manager-only):**
- * - Manager uses `send_user_feedback` MCP tool to communicate with users
- * - Worker output is NEVER directly shown to users - Manager decides what to share
+ * **User Communication:**
+ * - Agent output is streamed directly to users
+ * - Progress updates provided in real-time
+ * - Evaluator controls task completion signaling
  */
 export class DialogueOrchestrator {
-  readonly workerConfig: WorkerConfig;
+  readonly plannerConfig: { apiKey: string; model: string; apiBaseUrl?: string };
+  readonly executorConfig: LongTaskConfig;
   readonly evaluatorConfig: EvaluatorConfig;
   /** Maximum iterations from constants - single source of truth */
   readonly maxIterations = DIALOGUE.MAX_ITERATIONS;
@@ -89,7 +109,8 @@ export class DialogueOrchestrator {
   private previousWorkerOutput?: string;
 
   constructor(config: DialogueOrchestratorConfig) {
-    this.workerConfig = config.workerConfig;
+    this.plannerConfig = config.plannerConfig;
+    this.executorConfig = config.executorConfig;
     this.evaluatorConfig = config.evaluatorConfig;
     this.onTaskPlanGenerated = config.onTaskPlanGenerated;
 
@@ -125,90 +146,6 @@ export class DialogueOrchestrator {
   }
 
   /**
-   * Build a task completion message with detailed status.
-   *
-   * Distinguishes between different completion scenarios:
-   * - 'full': Worker executed and completed implementation
-   * - 'design_only': Manager completed task in Phase 1 without Worker execution
-   *
-   * @param iteration - Final iteration number
-   * @param completionType - Type of completion
-   * @returns Formatted completion message
-   */
-  private buildTaskCompletionMessage(
-    iteration: number,
-    completionType: 'full' | 'design_only'
-  ): AgentMessage {
-    const commonInfo = [
-      `**任务ID**: \`${this.taskId}\``,
-      `**完成迭代**: ${iteration}`,
-    ];
-
-    if (completionType === 'full') {
-      logger.info({
-        taskId: this.taskId,
-        iteration,
-        completionType: 'full',
-      }, 'Task completed with full implementation');
-
-      return {
-        content: `✅ **任务完成**\n\n` +
-          `${commonInfo.join('\n')}\n` +
-          `\n✨ **执行状态**: 代码已实现并验证完成\n\n` +
-          `感谢使用 Disclaude Task 模式！`,
-        role: 'assistant',
-        messageType: 'task_completion',
-      };
-    }
-
-    // design_only
-    logger.info({
-      taskId: this.taskId,
-      iteration,
-      completionType: 'design_only',
-    }, 'Task completed at design phase only');
-
-    return {
-      content: `✅ **任务完成（设计方案）**\n\n` +
-        `${commonInfo.join('\n')}\n` +
-        `\n📋 **已完成**:\n` +
-        `- ✅ Task.md 已创建\n` +
-        `- ✅ 实现方案已设计\n` +
-        `- ✅ 详细指令已生成\n\n` +
-        `⚠️ **注意**:\n` +
-        `- ❌ 代码尚未实现\n` +
-        `- 💡 请参考上述指令手动完成实现\n` +
-        `- 🧪 实现后请运行测试验证\n\n` +
-        `感谢使用 Disclaude Task 模式！`,
-      role: 'assistant',
-      messageType: 'task_completion',
-    };
-  }
-
-  /**
-   * Build a warning message when max iterations is reached.
-   *
-   * @param iteration - Final iteration number
-   * @returns Formatted warning message
-   */
-  private buildMaxIterationsWarning(iteration: number): AgentMessage {
-    logger.warn({ iteration }, 'Dialogue reached max iterations without completion');
-
-    return {
-      content: `⚠️ **达到最大迭代次数**\n\n` +
-        `已完成 ${iteration} 次迭代，达到系统限制。\n` +
-        `**任务ID**: \`${this.taskId}\`\n\n` +
-        `**建议**:\n` +
-        `1. 检查上述输出是否满足需求\n` +
-        `2. 如需继续，使用 /reset 重置对话\n` +
-        `3. 或调整任务需求后重新提交\n\n` +
-        `感谢使用 Disclaude Task 模式！`,
-      role: 'assistant',
-      messageType: 'max_iterations_warning',
-    };
-  }
-
-  /**
    * Save task plan on first iteration.
    *
    * Extracts and saves task plan from Manager's first output.
@@ -232,32 +169,33 @@ export class DialogueOrchestrator {
   }
 
   /**
-   * Process a single dialogue iteration with REAL-TIME streaming Manager-Worker communication.
+   * Process a single dialogue iteration with REAL-TIME streaming Evaluator-Planner/Executor communication.
    *
    * **NEW: Uses runIterationStreaming() for immediate user feedback**
-   * - Manager's messages are yielded immediately
-   * - Manager's tool calls (send_user_feedback) are executed in real-time
-   * - Worker's output is collected only for Manager evaluation
+   * - Agent messages are yielded immediately
+   * - Subtask progress is reported in real-time
+   * - Execution output is collected for Evaluator evaluation
    *
    * New Flow (Streaming):
-   *   1. Create IterationBridge with Manager and Worker configs
-   *   2. Run iteration with streaming: Manager messages are yielded immediately
-   *   3. When Worker sends 'result' message, iteration ends
-   *   4. Store Worker output for next iteration
+   *   1. Create IterationBridge with Evaluator and Planner/Executor configs
+   *   2. Run iteration with streaming: Agent messages are yielded immediately
+   *   3. When execution sends 'result' message, iteration ends
+   *   4. Store execution output for next iteration
    *
    * @param taskMdContent - Full Task.md content
    * @param iteration - Current iteration number
-   * @returns Async iterable of AgentMessage (real-time Manager output)
+   * @returns Async iterable of AgentMessage (real-time execution output)
    */
   private async *processIterationStreaming(
     taskMdContent: string,
     iteration: number
   ): AsyncIterable<AgentMessage> {
-    logger.debug({ iteration }, 'Processing iteration with direct Evaluator-Worker communication');
+    logger.debug({ iteration }, 'Processing iteration with Plan-and-Execute architecture');
 
     // Create IterationBridge with all necessary context including chatId
     const bridge = new IterationBridge({
-      workerConfig: this.workerConfig,
+      plannerConfig: this.plannerConfig,
+      executorConfig: this.executorConfig,
       evaluatorConfig: this.evaluatorConfig,
       taskMdContent,
       iteration,
@@ -279,7 +217,6 @@ export class DialogueOrchestrator {
         logger.debug({
           iteration,
           messageType: msg.messageType,
-          reason: msg.metadata?.reason,
         }, 'Task completion signal detected from Evaluator');
         taskDone = true;
       }
@@ -340,14 +277,13 @@ export class DialogueOrchestrator {
 
     const taskMdContent = await fs.readFile(taskPath, 'utf-8');
     let iteration = 0;
-    let taskCompleted = false;
 
     logger.info(
       { taskId: this.taskId, chatId, maxIterations: this.maxIterations },
-      'Starting Manager-First dialogue flow with REAL-TIME streaming'
+      'Starting Plan-and-Execute dialogue flow with REAL-TIME streaming'
     );
 
-    // Main dialogue loop: Manager → Worker → Manager → Worker → ...
+    // Main dialogue loop: Evaluator → Planner/Executor → Evaluator → Planner/Executor → ...
     while (iteration < this.maxIterations) {
       iteration++;
 
@@ -369,22 +305,21 @@ export class DialogueOrchestrator {
 
       // Check if task was completed during this iteration
       if (this.currentIterationTaskDone) {
-        taskCompleted = true;
-
-        // Determine completion type: did Worker execute?
-        const hasWorkerExecution = this.previousWorkerOutput && this.previousWorkerOutput.length > 0;
-        const completionType: 'full' | 'design_only' = hasWorkerExecution ? 'full' : 'design_only';
-
-        // Send task completion message with detailed status
-        yield this.buildTaskCompletionMessage(iteration, completionType);
-
         break;
       }
     }
 
-    // Warn if max iterations reached without completion
-    if (!taskCompleted && iteration >= this.maxIterations) {
-      yield this.buildMaxIterationsWarning(iteration);
+    // Log warning if max iterations reached without task completion
+    if (iteration >= this.maxIterations && !this.currentIterationTaskDone) {
+      logger.warn(
+        {
+          taskId: this.taskId,
+          chatId,
+          iteration,
+          maxIterations: this.maxIterations,
+        },
+        '⚠️  Task stopped after reaching maximum iterations without completion signal'
+      );
     }
   }
 }

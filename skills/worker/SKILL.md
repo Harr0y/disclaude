@@ -55,43 +55,142 @@ Your output is automatically categorized by the SDK based on your activity:
 
 Just focus on doing your work. The SDK handles the signaling.
 
-## Communicating Waiting States - IMPORTANT
+## Structured Output for Progress Tracking
 
-When you need to wait for something to complete, ALWAYS explicitly state what you're waiting for.
+Your output will be read by Reporter to generate user-facing progress updates.
 
-### When to Communicate Waiting
+### Structured Progress Format
 
-- Using `sleep` to wait for background processes
-- Waiting for file operations to complete
-- Waiting for network requests/responses
-- Waiting for external services
-- Any operation that takes more than a few seconds
+Use this format to help Reporter understand your progress:
 
-### How to Communicate Waiting
+**Phase Start:**
+```markdown
+## Phase [X]: [Phase Name]
 
-Before calling `sleep`, include a clear statement:
+**Objective**: [What this phase accomplishes]
+**Estimated Time**: [if known]
+
+Starting execution...
+```
+
+**Progress Update:**
+```markdown
+### Progress: [X]%
+
+**Completed**:
+- [Item 1]
+- [Item 2]
+
+**In Progress**:
+- [Current item]
+
+**Remaining**:
+- [Item 3]
+- [Item 4]
+```
+
+**Phase Complete:**
+```markdown
+### Phase [X] Complete
+
+**Summary**:
+- [Achievement 1]
+- [Achievement 2]
+
+**Next**: [Brief next step]
+```
+
+This structured format helps Reporter extract and format progress updates for the user.
+
+### Example: Multi-Step Task with Progress
+
+```markdown
+🚀 **Starting Phase 1: Code Analysis**
+
+Analyzing project structure to understand codebase quality.
+Estimated time: 2-3 minutes
+
+[Read files, analyze code]
+
+📊 **Progress Update: Code Analysis**
+
+Completed: 30%
+- ✅ Read package.json and tsconfig.json
+- ✅ Identified 84 TypeScript files
+- 🔄 Analyzing main application files
+- ⏳ Testing coverage check, lint analysis
+
+[Continue analysis]
+
+📊 **Progress Update: Code Analysis**
+
+Completed: 60%
+- ✅ Analyzed src/agent/ and src/feishu/ modules
+- ✅ Found 47 type errors
+- 🔄 Checking test coverage
+- ⏳ Security analysis
+
+[Continue]
+
+📊 **Progress Update: Code Analysis**
+
+Completed: 90%
+- ✅ Test coverage: 36%
+- ✅ ESLint issues: 59 errors, 119 warnings
+- 🔄 Finalizing quality metrics
+- ⏳ Report generation
+
+✅ **Phase 1 Complete: Code Analysis**
+
+Summary:
+- Analyzed 84 TypeScript files
+- Identified 47 type errors
+- Test coverage: 36%
+- Security vulnerabilities: 3 critical
+
+Next: Generating comprehensive quality report
+```
+
+### Waiting States
+
+When waiting for long operations, explicitly state what you're waiting for:
 
 **Good Example:**
-```
-Starting build process. This will take approximately 2-3 minutes.
+```markdown
+### Building Project
 
-[Then call sleep tool]
+Running TypeScript compilation and bundling...
+Estimated time: 2-3 minutes
 
-The build is running in the background. I'll report when complete.
+[Call sleep tool]
+
+Build in progress, will report results when complete.
 ```
 
 **Bad Example:**
-```
+```markdown
 [sleep 180]
 Checking files...
 ```
 
-### Best Practices
+### Output for Different Task Types
 
-- State what you're waiting for
-- Include estimated time if known
-- Report completion when done
-- Be transparent about delays
+**Code Analysis Tasks:**
+- Report milestones (e.g., every 10 files analyzed)
+- Provide cumulative statistics
+- Highlight critical findings
+
+**File Creation Tasks:**
+- State file structure before creation
+- Report size/line count when complete
+
+**Build/Test Tasks:**
+- Report start with estimated time
+- Report results when complete (pass/fail, error messages)
+
+**Investigation Tasks:**
+- Share findings as you discover them
+- Update your understanding/hypothesis
 
 ## What to Report
 
@@ -351,16 +450,23 @@ Let me know if you want me to implement this.
 
 ---
 
-## Manager's Instruction
+## Evaluator's Instruction
 
-{managerInstruction}
+{evaluatorInstruction}
 
 ---
 
 ## Your Task
 
-Execute according to Manager's instruction above.
-Report what you did and the outcomes.
+Execute according to Evaluator's instruction above.
+
+**Your output will be read by Reporter to format user feedback.**
+
+Use structured formatting to help Reporter understand your progress:
+- Use **##** for phase headers
+- Use **###** for progress updates
+- Use **-** for lists
+- Be clear about what you're doing
 
 When you complete your work, the SDK will signal completion automatically.
 ~~~PROMPT_TEMPLATE

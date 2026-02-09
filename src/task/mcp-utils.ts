@@ -22,7 +22,9 @@ import type { AgentMessage } from '../types/agent.js';
  * parseBaseToolName("") // ""
  */
 export function parseBaseToolName(toolName: string): string {
-  if (!toolName) return '';
+  if (!toolName) {
+    return '';
+  }
   return toolName.includes('__')
     ? toolName.split('__').pop() || toolName
     : toolName;

@@ -1,34 +1,43 @@
 /**
- * IterationBridge - Simplified Evaluator-Worker communication with REAL-TIME streaming.
+ * IterationBridge - Simplified Evaluator-Planner-Executor communication with REAL-TIME streaming.
  *
- * **Architecture (P0 - Direct Evaluator → Worker):**
+ * **Architecture (P0 - Direct Evaluator → Planner + Executor):**
  * - Phase 1: Evaluator evaluates task completion and calls task_done if complete
- * - Phase 2: If not complete, Worker executes with Evaluator's feedback
- * - Phase 3: Reporter receives Worker output and organizes user feedback
+ * - Phase 2: If not complete, Planner breaks down task into subtasks
+ * - Phase 3: Executor executes subtasks sequentially with isolated agents
  *
  * **Key Components:**
  * - **Evaluator** (Phase 1): Specialized in task completion evaluation
- * - **Worker** (Phase 2): Executes tasks with full tool access
- * - **Reporter** (Phase 3): Organizes user feedback
+ * - **TaskPlanner** (Phase 2): Breaks down tasks into subtasks
+ * - **Worker** (Phase 3 - simple): Executes simple tasks directly
+ * - **SubtaskExecutor** (Phase 3 - complex): Executes individual subtasks from plan
+ *
+ * **Plan-and-Execute Architecture:**
+ * - TaskPlanner decomposes complex tasks into subtasks
+ * - For simple tasks: Worker executes directly
+ * - For complex tasks: SubtaskExecutor runs each subtask with fresh Worker instances
+ * - Each subtask executed by fresh agent instance (isolation)
+ * - Sequential handoff with context passing
+ * - Results aggregated for final output
  *
  * **Real-time Streaming:**
- * - Reporter's messages (send_user_feedback) are yielded immediately for execution
- * - Worker's output is NOT yielded (only for Evaluator evaluation)
+ * - All agent messages are yielded immediately for user feedback
+ * - Subtask progress tracked and reported in real-time
  *
  * **Direct Architecture:**
- * - Evaluator provides missing_items directly to Worker
+ * - Evaluator provides missing_items directly to next execution phase
  * - No Manager intermediate layer - simpler and faster
  */
 
-import type { SDKUserMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { AgentMessage } from '../types/agent.js';
 import { extractText } from '../utils/sdk.js';
-import { Worker, type WorkerConfig } from './worker.js';
-import { Evaluator, type EvaluatorConfig, type EvaluatorInput, type EvaluationResult } from './evaluator.js';
+import { Evaluator, type EvaluatorConfig, type EvaluationResult } from './evaluator.js';
+import { TaskPlanner } from '../long-task/planner.js';
+import { SubtaskExecutor } from '../long-task/executor.js';
+import type { LongTaskConfig, SubtaskResult, LongTaskPlan } from '../long-task/types.js';
 import { createLogger } from '../utils/logger.js';
-import { isTaskDoneTool } from './mcp-utils.js';
 import { parseTaskMd } from './prompt-builder.js';
-import { loadSkill } from './skill-loader.js';
+import { Config } from '../config/index.js';
 
 const logger = createLogger('IterationBridge', {});
 
@@ -52,7 +61,15 @@ export interface IterationResult {
  * Configuration for IterationBridge.
  */
 export interface IterationBridgeConfig {
-  workerConfig: WorkerConfig;
+  /** Planner configuration for task planning */
+  plannerConfig: {
+    apiKey: string;
+    model: string;
+    apiBaseUrl?: string;
+  };
+  /** Executor configuration for subtask execution */
+  executorConfig: LongTaskConfig;
+  /** Evaluator configuration */
   evaluatorConfig: EvaluatorConfig;
   /** Full Task.md content */
   taskMdContent: string;
@@ -65,22 +82,26 @@ export interface IterationBridgeConfig {
 }
 
 /**
- * IterationBridge - Simplified Evaluator-Worker communication for a single iteration.
+ * IterationBridge - Simplified Evaluator-Planner-Executor communication for a single iteration.
  *
  * Usage:
  * ```typescript
  * const bridge = new IterationBridge({
- *   workerConfig: { apiKey, model },
+ *   plannerConfig: { apiKey, model },
+ *   executorConfig: { apiKey, model, sendMessage, sendCard, chatId },
  *   evaluatorConfig: { apiKey, model },
  *   taskMdContent,
  *   iteration: 1,
  * });
  *
- * const result = await bridge.runIteration();
+ * for await (const msg of bridge.runIterationStreaming()) {
+ *   // Handle real-time messages
+ * }
  * ```
  */
 export class IterationBridge {
-  readonly workerConfig: WorkerConfig;
+  readonly plannerConfig: { apiKey: string; model: string; apiBaseUrl?: string };
+  readonly executorConfig: LongTaskConfig;
   readonly evaluatorConfig: EvaluatorConfig;
   readonly taskMdContent: string;
   readonly iteration: number;
@@ -89,13 +110,12 @@ export class IterationBridge {
 
   // Completion tracking
   private taskDoneSignaled = false;  // Set when Evaluator calls task_done
-  // Worker output for Evaluator evaluation
-  private workerOutput = '';
-  // Evaluation result from Evaluator
-  private lastEvaluationResult?: EvaluationResult;
+  private workerToManagerQueue: AgentMessage[] = [];
+  private workerDone = false;
 
   constructor(config: IterationBridgeConfig) {
-    this.workerConfig = config.workerConfig;
+    this.plannerConfig = config.plannerConfig;
+    this.executorConfig = config.executorConfig;
     this.evaluatorConfig = config.evaluatorConfig;
     this.taskMdContent = config.taskMdContent;
     this.iteration = config.iteration;
@@ -104,30 +124,29 @@ export class IterationBridge {
   }
 
   /**
-   * Run a single iteration with DIRECT Evaluator → Worker communication.
+   * Run a single iteration with DIRECT Evaluator → Planner/Executor communication.
    *
-   * **Direct architecture (P0):**
+   * **Plan-and-Execute architecture (P0):**
    * - Phase 1: Evaluator evaluates task completion, calls task_done if complete
-   * - Phase 2: Worker executes with Evaluator's feedback (if not complete)
+   * - Phase 2: If not complete, always use Planner to break down task, then Executor executes subtasks
    *
    * Key design:
    * - task_done decision happens in Phase 1 (Evaluator)
    * - First iteration: No task_done possible (no Worker output yet)
-   * - Evaluator provides missing_items directly to Worker
+   * - Evaluator provides missing_items directly to execution phase
+   * - All tasks use TaskPlanner → SubtaskExecutor flow (no simple/direct mode)
    *
    * @returns Async iterable of AgentMessage
    */
   async *runIterationStreaming(): AsyncIterable<AgentMessage> {
     logger.info({
       iteration: this.iteration,
-    }, 'Starting three-phase IterationBridge iteration with Evaluator (P0 Architecture)');
+    }, 'Starting three-phase IterationBridge iteration with Evaluator (Plan-and-Execute Architecture)');
 
     // Reset state for this iteration
     this.workerToManagerQueue = [];
     this.workerDone = false;
-    this.collectedManagerInstruction = '';
     this.taskDoneSignaled = false;
-    this.lastEvaluationResult = undefined;
 
     // === Phase 1a: Evaluation - Evaluator decides if task is complete ===
     const evaluator = new Evaluator(this.evaluatorConfig);
@@ -141,9 +160,6 @@ export class IterationBridge {
       }, 'Phase 1a: Evaluation - Evaluator assessing task completion');
 
       evaluationResult = await this.evaluateCompletion(evaluator);
-
-      // Store evaluation result for Manager to use
-      this.lastEvaluationResult = evaluationResult;
 
       if (evaluationResult.is_complete) {
         logger.info({
@@ -161,13 +177,11 @@ export class IterationBridge {
           role: 'assistant',
           messageType: 'task_completion',
           metadata: {
-            is_complete: true,
-            reason: evaluationResult.reason,
-            confidence: evaluationResult.confidence,
+            status: 'complete',
           },
         };
 
-        return;  // Early return - task complete, no Worker or Manager needed
+        return;  // Early return - task complete, no Worker needed
       }
 
       logger.info({
@@ -180,64 +194,165 @@ export class IterationBridge {
       evaluator.cleanup();
     }
 
-    // === Phase 2: Worker executes with Evaluator's feedback ===
+    // === Phase 2: Execution with Evaluator's feedback ===
     // Parse Task.md to extract metadata and user request
     const taskMetadata = parseTaskMd(this.taskMdContent);
-
-    // Load Worker skill for prompt template
-    const workerSkillResult = await loadSkill('worker');
-    const workerSkillContent = workerSkillResult.success && workerSkillResult.skill
-      ? workerSkillResult.skill.content
-      : undefined;
 
     // Determine task path from Task.md (fallback to taskId if not found)
     // Task.md is typically at workspace/tasks/{taskId}/Task.md
     const taskPath = `workspace/tasks/${taskMetadata.messageId}/Task.md`;
 
-    // Format Evaluator output as Worker instruction
-    const workerInstruction = this.formatEvaluatorOutputAsInstruction(evaluationResult);
-
-    // Build Worker prompt with Evaluator's feedback
-    const workerPrompt = Worker.buildPrompt(
-      taskMetadata.userRequest,
-      workerInstruction,
-      taskMetadata.chatId || this.chatId || '',
-      taskMetadata.messageId,
-      taskPath,
-      workerSkillContent
-    );
+    // Format Evaluator output as execution instruction
+    const executionInstruction = this.formatEvaluatorOutputAsInstruction(evaluationResult);
 
     logger.debug({
       iteration: this.iteration,
-      instructionLength: workerInstruction.length,
+      instructionLength: executionInstruction.length,
       chatId: taskMetadata.chatId || this.chatId,
       messageId: taskMetadata.messageId,
-    }, 'Phase 2: Worker executing with Evaluator feedback (direct architecture)');
+    }, 'Phase 2: Execution phase with Evaluator feedback (streaming to user)');
 
-    // Create Worker instance
-    const worker = new Worker(this.workerConfig);
-    await worker.initialize();
-
-    try {
-      // Run Worker coroutine
-      await this.runWorkerCoroutine(worker, workerPrompt);
-
-      logger.info({
-        iteration: this.iteration,
-        queuedMessages: this.workerToManagerQueue.length,
-      }, 'Phase 2: Worker completed');
-
-      // Store Worker output for next iteration's Evaluator
-      this.workerOutput = this.collectWorkerResults();
-
-    } finally {
-      // Cleanup Worker
-      worker.cleanup();
-    }
+    // Always use planning mode (Plan-and-Execute architecture)
+    logger.info('Using Plan-and-Execute mode with TaskPlanner and SubtaskExecutor');
+    yield* this.executeWithPlanning(executionInstruction, taskMetadata);
 
     logger.info({
       iteration: this.iteration,
-    }, 'Direct architecture IterationBridge iteration complete');
+      totalMessages: this.workerToManagerQueue.length,
+    }, 'Phase 2: Execution phase complete (streamed to user)');
+  }
+
+  /**
+   * Execute task with planning and multi-agent relay (complex tasks).
+   */
+  private async *executeWithPlanning(
+    instruction: string,
+    taskMetadata: { chatId?: string; messageId: string; userRequest: string }
+  ): AsyncIterable<AgentMessage> {
+    // Phase 1: Create plan
+    yield {
+      content: '📋 **Planning Phase**\n\nAnalyzing task and creating execution plan...',
+      role: 'assistant',
+      messageType: 'progress',
+    };
+
+    const planner = new TaskPlanner(
+      this.plannerConfig.apiKey,
+      this.plannerConfig.model,
+      this.plannerConfig.apiBaseUrl
+    );
+    let plan: LongTaskPlan;
+
+    try {
+      plan = await planner.planTask(instruction, {
+        model: this.plannerConfig.model,
+      });
+
+      logger.info({
+        taskId: plan.taskId,
+        subtasks: plan.totalSteps,
+      }, 'Task plan created');
+
+      yield {
+        content: `✅ **Plan Created**: ${plan.title}\n\n**Steps**: ${plan.totalSteps}\n\n${plan.subtasks.map((s, i) => `${i + 1}. ${s.title}`).join('\n')}\n\n⏳ Starting execution...`,
+        role: 'assistant',
+        messageType: 'progress',
+      };
+    } catch (error) {
+      logger.error({ err: error }, 'Planning failed - cannot proceed without execution plan');
+      yield {
+        content: `❌ **Planning Failed**: ${error instanceof Error ? error.message : String(error)}`,
+        role: 'assistant',
+        messageType: 'error',
+      };
+      // Cannot proceed without a plan - rethrow the error
+      throw error;
+    }
+
+    // Phase 2: Execute subtasks with SubtaskExecutor
+    const subtaskResults: SubtaskResult[] = [];
+
+    for (let i = 0; i < plan.subtasks.length; i++) {
+      const subtask = plan.subtasks[i];
+      const subtaskNumber = i + 1;
+
+      logger.debug({
+        subtaskNumber,
+        title: subtask.title,
+      }, 'Executing subtask');
+
+      yield {
+        content: `🔄 **Step ${subtaskNumber}/${plan.totalSteps}**: ${subtask.title}`,
+        role: 'assistant',
+        messageType: 'progress',
+      };
+
+      const executor = new SubtaskExecutor(
+        this.executorConfig.apiKey,
+        this.executorConfig.model,
+        this.executorConfig
+      );
+
+      try {
+        const result = await executor.executeSubtask(
+          subtask,
+          subtaskResults,
+          Config.getWorkspaceDir()
+        );
+
+        subtaskResults.push(result);
+
+        // Store result for Evaluator's evaluation
+        this.workerToManagerQueue.push({
+          content: `Step ${subtaskNumber} completed: ${subtask.title}\n\n${result.summary}`,
+          role: 'assistant',
+          messageType: 'text',
+        });
+
+        if (!result.success) {
+          yield {
+            content: `❌ **Step ${subtaskNumber} failed**, stopping execution`,
+            role: 'assistant',
+            messageType: 'error',
+          };
+          break;
+        }
+
+        yield {
+          content: `✅ **Step ${subtaskNumber} completed**: ${subtask.title}`,
+          role: 'assistant',
+          messageType: 'progress',
+        };
+      } catch (error) {
+        logger.error({
+          err: error,
+          subtaskNumber,
+        }, 'Subtask execution failed');
+
+        yield {
+          content: `❌ **Step ${subtaskNumber} failed**: ${error instanceof Error ? error.message : String(error)}`,
+          role: 'assistant',
+          messageType: 'error',
+        };
+        break;
+      }
+    }
+
+    // Phase 3: Aggregate and finalize
+    const completedSteps = subtaskResults.filter(r => r.success).length;
+    const finalOutput = subtaskResults.map(r => r.summary).join('\n\n---\n\n');
+
+    yield {
+      content: `🎉 **Multi-Agent Relay Complete**\n\n**Completed**: ${completedSteps}/${plan.totalSteps} steps\n\n**Summary**:\n\n${finalOutput}`,
+      role: 'assistant',
+      messageType: 'result',
+      metadata: {
+        usedPlanning: true,
+        subtaskCount: plan.totalSteps,
+      },
+    };
+
+    this.workerDone = true;
   }
 
   /**
@@ -286,28 +401,6 @@ export class IterationBridge {
    * @param evaluator - Evaluator instance
    * @returns Evaluation result
    */
-
-  /**
-   * Format Evaluator's output as Worker instruction.
-   *
-   * Converts EvaluationResult into clear, actionable instructions for Worker.
-   *
-   * @param evaluationResult - Result from Evaluator
-   * @returns Formatted instruction string for Worker
-   */
-  private formatEvaluatorOutputAsInstruction(evaluationResult: EvaluationResult): string {
-    // If no missing items but also not complete (edge case), use reason
-    if (evaluationResult.missing_items.length === 0) {
-      return evaluationResult.reason;
-    }
-
-    // Format missing_items as clear instructions
-    let instruction = 'Based on the evaluation, the following items need to be addressed:\n\n';
-    instruction += evaluationResult.missing_items.map((item, i) => `${i + 1}. ${item}`).join('\n');
-    instruction += '\n\nPlease complete these items to fulfill the task requirements.';
-
-    return instruction;
-  }
   private async evaluateCompletion(evaluator: Evaluator): Promise<EvaluationResult> {
     // Query Evaluator and parse result
     const { result } = await evaluator.evaluate(
@@ -325,6 +418,28 @@ export class IterationBridge {
     }, 'Evaluator result received');
 
     return result;
+  }
+
+  /**
+   * Format Evaluator's output as execution instruction.
+   *
+   * Converts EvaluationResult into clear, actionable instructions for execution.
+   *
+   * @param evaluationResult - Result from Evaluator
+   * @returns Formatted instruction string for execution
+   */
+  private formatEvaluatorOutputAsInstruction(evaluationResult: EvaluationResult): string {
+    // If no missing items but also not complete (edge case), use reason
+    if (evaluationResult.missing_items.length === 0) {
+      return evaluationResult.reason;
+    }
+
+    // Format missing_items as clear instructions
+    let instruction = 'Based on the evaluation, the following items need to be addressed:\n\n';
+    instruction += evaluationResult.missing_items.map((item, i) => `${i + 1}. ${item}`).join('\n');
+    instruction += '\n\nPlease complete these items to fulfill the task requirements.';
+
+    return instruction;
   }
 
   /**
@@ -353,58 +468,4 @@ export class IterationBridge {
     return this.collectWorkerResults();
   }
 
-  /**
-   * Convert string prompt to AsyncIterable<SDKUserMessage> for Streaming Input mode.
-   * This enables Manager to receive multi-turn conversation context.
-   *
-   * @param prompt - String prompt to convert
-   * @returns Async iterable of SDK user messages
-   */
-  private async *promptAsMessages(prompt: string): AsyncIterable<SDKUserMessage> {
-    yield {
-      type: 'user',
-      message: {
-        role: 'user',
-        content: prompt,
-      },
-      parent_tool_use_id: null,
-      session_id: '',
-    };
-  }
-
-  /**
-   * Worker coroutine - executes task and queues messages for Manager.
-   *
-   * Worker calls SDK query(), SDK starts Worker coroutine.
-   * All messages are queued for Manager, not yielded to user.
-   *
-   * @param worker - Worker instance
-   * @param prompt - Worker prompt
-   */
-  private async runWorkerCoroutine(worker: Worker, prompt: string): Promise<void> {
-    logger.debug({
-      iteration: this.iteration,
-      promptLength: prompt.length,
-    }, 'Worker coroutine started');
-
-    // worker.queryStream() calls SDK query() which starts Worker coroutine
-    for await (const msg of worker.queryStream(prompt)) {
-      // Queue all Worker messages for Manager (not yielded to user)
-      this.workerToManagerQueue.push(msg);
-
-      // Check for result message - Worker is done
-      if (msg.messageType === 'result') {
-        logger.debug({
-          iteration: this.iteration,
-        }, 'Worker sent result message, setting workerDone=true');
-        this.workerDone = true;
-        break; // Worker coroutine ends
-      }
-    }
-
-    logger.debug({
-      iteration: this.iteration,
-      queuedMessages: this.workerToManagerQueue.length,
-    }, 'Worker coroutine finished');
-  }
 }

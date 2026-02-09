@@ -135,6 +135,10 @@ export interface SubtaskResult {
  * Configuration for the long task manager.
  */
 export interface LongTaskConfig {
+  /** API key for authentication */
+  apiKey: string;
+  /** Model identifier */
+  model: string;
   /** Base workspace directory */
   workspaceBaseDir: string;
   /** Send message callback for progress updates */

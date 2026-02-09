@@ -1,9 +1,16 @@
 /**
  * Task planner - breaks down user requests into subtasks.
+ *
+ * Follows the same skill-based initialization pattern as Scout and Evaluator.
  */
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { LongTaskPlan } from './types.js';
-import { createAgentSdkOptions, parseSDKMessage } from '../utils/sdk.js';
+import { parseSDKMessage, buildSdkEnv } from '../utils/sdk.js';
+import { Config } from '../config/index.js';
+import { createLogger } from '../utils/logger.js';
+import { loadSkill, type ParsedSkill } from '../task/skill-loader.js';
+
+const logger = createLogger('TaskPlanner');
 
 /**
  * Task planner for decomposing complex tasks.
@@ -11,10 +18,38 @@ import { createAgentSdkOptions, parseSDKMessage } from '../utils/sdk.js';
 export class TaskPlanner {
   private readonly apiKey: string;
   private readonly model: string;
+  private readonly apiBaseUrl?: string;
+  private skill?: ParsedSkill;
+  private initialized = false;
+  private readonly workingDirectory: string;
 
-  constructor(apiKey: string, model: string) {
+  constructor(apiKey: string, model: string, apiBaseUrl?: string) {
     this.apiKey = apiKey;
     this.model = model;
+    this.apiBaseUrl = apiBaseUrl;
+    this.workingDirectory = Config.getWorkspaceDir();
+  }
+
+  /**
+   * Initialize planner by loading skill file.
+   * Must be called before planTask().
+   */
+  async initialize(): Promise<void> {
+    if (this.initialized) {
+      return;
+    }
+
+    // Load skill
+    const skillResult = await loadSkill('planner');
+    if (skillResult.success && skillResult.skill) {
+      this.skill = skillResult.skill;
+      logger.debug({ skillName: 'planner' }, 'Planner skill loaded');
+    } else {
+      logger.warn({ error: skillResult.error }, 'Planner skill not found, using fallback prompt');
+    }
+
+    this.initialized = true;
+    logger.debug('TaskPlanner initialized');
   }
 
   /**
@@ -28,8 +63,15 @@ export class TaskPlanner {
 
   /**
    * Create task planning prompt.
+   * Uses skill-based prompt if available, otherwise falls back to hardcoded prompt.
    */
   private createPlanningPrompt(userRequest: string): string {
+    // Use skill-based prompt if skill is loaded
+    if (this.skill && this.skill.content) {
+      return `${this.skill.content}\n\n## User Request\n\n${userRequest}`;
+    }
+
+    // Fallback to hardcoded prompt if skill not loaded
     return `You are a task planning expert. Your job is to break down complex user requests into a linear sequence of subtasks.
 
 ## Your Role
@@ -144,18 +186,46 @@ Now, analyze this request and respond with ONLY the JSON plan (no explanation, n
    * Plan a long task by breaking it into subtasks.
    */
   async planTask(userRequest: string, agentOptions?: { model?: string; apiBaseUrl?: string }): Promise<LongTaskPlan> {
+    // Ensure initialization (load skill)
+    if (!this.initialized) {
+      await this.initialize();
+    }
+
     const taskId = this.generateTaskId();
 
-    // Create SDK options using shared utility
-    const sdkOptions = createAgentSdkOptions({
-      apiKey: this.apiKey,
-      model: agentOptions?.model || this.model,
-      apiBaseUrl: agentOptions?.apiBaseUrl,
-      cwd: process.cwd(),
+    // Create SDK options using unified helper (like Scout/Evaluator)
+    // TaskPlanner only needs Read/Glob/Grep tools for planning, not browser automation
+    const allowedTools = this.skill?.allowedTools || ['Read', 'Glob', 'Grep', 'Write', 'Bash'];
+
+    const sdkOptions: Record<string, unknown> = {
+      cwd: this.workingDirectory,
       permissionMode: 'bypassPermissions',
-    });
+      settingSources: ['project'],
+      allowedTools,  // Planning doesn't need browser tools
+    };
+
+    // Set environment using unified helper (includes process.env inheritance!)
+    const apiBaseUrl = agentOptions?.apiBaseUrl || this.apiBaseUrl;
+    sdkOptions.env = buildSdkEnv(this.apiKey, apiBaseUrl);
+
+    // Set model
+    const model = agentOptions?.model || this.model;
+    if (model) {
+      sdkOptions.model = model;
+    }
 
     try {
+      logger.debug({
+        taskId,
+        userRequest,
+        hasSkill: !!this.skill,
+        model: agentOptions?.model || this.model,
+        sdkOptionsKeys: Object.keys(sdkOptions),
+        allowedTools: (sdkOptions as { allowedTools?: string[] }).allowedTools,
+        hasEnv: !!(sdkOptions as { env?: Record<string, unknown> }).env,
+        cwd: (sdkOptions as { cwd?: string }).cwd,
+      }, 'Calling SDK query() for task planning');
+
       // Query planning agent
       const queryResult = query({
         prompt: this.createPlanningPrompt(userRequest),
@@ -164,12 +234,20 @@ Now, analyze this request and respond with ONLY the JSON plan (no explanation, n
 
       // Collect response
       let fullResponse = '';
+      let messageCount = 0;
       for await (const message of queryResult) {
+        messageCount++;
         const parsed = parseSDKMessage(message);
         if (parsed.content) {
           fullResponse += parsed.content;
         }
       }
+
+      logger.debug({
+        taskId,
+        messageCount,
+        responseLength: fullResponse.length,
+      }, 'SDK query() completed, response collected');
 
       // Extract JSON from response
       const planData = this.extractPlanFromResponse(fullResponse);
@@ -188,8 +266,18 @@ Now, analyze this request and respond with ONLY the JSON plan (no explanation, n
       // Validate plan
       this.validatePlan(plan);
 
+      logger.info({
+        taskId,
+        title: plan.title,
+        subtaskCount: plan.totalSteps,
+      }, 'Task plan created successfully');
+
       return plan;
     } catch (error) {
+      logger.error({
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+      }, 'Task planning failed');
       throw new Error(`Task planning failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }

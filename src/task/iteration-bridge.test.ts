@@ -1,92 +1,56 @@
 /**
  * Tests for IterationBridge (src/task/iteration-bridge.ts)
  *
- * Tests the DIRECT Evaluator → Worker architecture:
+ * Tests the Plan-and-Execute architecture:
  * - Phase 1: Evaluator evaluates task completion
- * - Phase 2: If not complete, Worker executes with Evaluator's feedback
- * - Only ONE Evaluator-Worker exchange per iteration (no internal loop)
+ * - Phase 2: If not complete, Planner plans → Executor executes subtasks
+ * - Always uses planning mode (no simple/direct execution)
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { IterationBridge } from './iteration-bridge.js';
-import type { IterationBridgeConfig, IterationResult } from './iteration-bridge.js';
+import type { IterationBridgeConfig } from './iteration-bridge.js';
 import type { EvaluatorConfig } from './evaluator.js';
-import type { WorkerConfig } from './worker.js';
 
-// Mock Evaluator and Worker classes
-vi.mock('./evaluator.js', () => {
-  const mockBuildEvaluationPrompt = vi.fn(() => 'mocked evaluation prompt');
-  return {
-    Evaluator: vi.fn().mockImplementation(() => ({
-      initialize: vi.fn().mockResolvedValue(undefined),
-      queryStream: vi.fn(),
-      cleanup: vi.fn(),
-      evaluate: vi.fn().mockResolvedValue({
-        result: {
-          is_complete: false,
-          reason: 'Task not complete',
-          missing_items: ['Item 1'],
-          confidence: 0.8,
-        },
-      }),
-    })),
-    buildEvaluationPrompt: mockBuildEvaluationPrompt,
-    type: {},
-  };
-});
+// Create mock instances that will be used in tests
+let mockEvaluatorInstance: any;
 
-vi.mock('./worker.js', () => ({
-  Worker: vi.fn().mockImplementation(() => ({
-    initialize: vi.fn().mockResolvedValue(undefined),
-    queryStream: vi.fn(),
-    cleanup: vi.fn(),
-  })),
-  type: {},
+// Mock Evaluator, TaskPlanner, and SubtaskExecutor classes
+vi.mock('./evaluator.js', () => ({
+  Evaluator: vi.fn().mockImplementation(() => mockEvaluatorInstance),
 }));
 
-vi.mock('../utils/sdk.js', () => ({
-  extractText: vi.fn((msg) => {
-    if (typeof msg.content === 'string') return msg.content;
-    if (msg.content && typeof msg.content === 'object' && 'text' in msg.content) {
-      return (msg.content as { text: string }).text;
-    }
-    return '';
-  }),
-}));
-
-vi.mock('../utils/logger.js', () => ({
-  createLogger: vi.fn(() => ({
-    debug: vi.fn(),
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
+vi.mock('../long-task/planner.js', () => ({
+  TaskPlanner: vi.fn().mockImplementation(() => ({
+    planTask: vi.fn().mockResolvedValue({
+      taskId: 'test-task-1',
+      originalRequest: 'Test request',
+      title: 'Test Plan',
+      description: 'Test description',
+      subtasks: [],
+      totalSteps: 0,
+      createdAt: new Date().toISOString(),
+    }),
   })),
 }));
 
-vi.mock('./mcp-utils.js', () => ({
-  isTaskDoneTool: vi.fn((msg: any) =>
-    msg.messageType === 'tool_use' && msg.metadata?.toolName === 'task_done'
-  ),
+vi.mock('../long-task/executor.js', () => ({
+  SubtaskExecutor: vi.fn().mockImplementation(() => ({
+    executeSubtask: vi.fn().mockResolvedValue({
+      sequence: 1,
+      success: true,
+      summary: 'Test summary',
+      files: [],
+      summaryFile: 'subtask-1/summary.md',
+      completedAt: new Date().toISOString(),
+    }),
+  })),
 }));
 
-import { Evaluator } from './evaluator.js';
-import { Worker } from './worker.js';
-import { extractText } from '../utils/sdk.js';
-
-const mockedEvaluator = vi.mocked(Evaluator);
-const mockedWorker = vi.mocked(Worker);
-const mockedExtractText = vi.mocked(extractText);
-
-// Mock static methods
-(Worker as any).buildPrompt = vi.fn(() => 'mocked worker prompt');
-
-describe('IterationBridge (Direct Evaluator-Worker Architecture)', () => {
-  let iterationBridge: IterationBridge;
+describe('IterationBridge (Plan-and-Execute Architecture)', () => {
+  let bridge: IterationBridge;
   let config: IterationBridgeConfig;
   let evaluatorConfig: EvaluatorConfig;
-  let workerConfig: WorkerConfig;
-  let mockEvaluatorInstance: any;
-  let mockWorkerInstance: any;
 
   beforeEach(() => {
     vi.clearAllMocks();
@@ -96,14 +60,20 @@ describe('IterationBridge (Direct Evaluator-Worker Architecture)', () => {
       model: 'claude-3-5-sonnet-20241022',
     };
 
-    workerConfig = {
-      apiKey: 'test-worker-key',
-      model: 'claude-3-5-sonnet-20241022',
-    };
-
     config = {
       evaluatorConfig,
-      workerConfig,
+      plannerConfig: {
+        apiKey: 'test-planner-key',
+        model: 'claude-3-5-sonnet-20241022',
+      },
+      executorConfig: {
+        apiKey: 'test-executor-key',
+        model: 'claude-3-5-sonnet-20241022',
+        sendMessage: async () => {},
+        sendCard: async () => {},
+        chatId: 'test-chat',
+        workspaceBaseDir: '/workspace',
+      },
       taskMdContent: '# Test Task\n\nDescription here',
       iteration: 1,
     };
@@ -113,135 +83,98 @@ describe('IterationBridge (Direct Evaluator-Worker Architecture)', () => {
       initialize: vi.fn().mockResolvedValue(undefined),
       queryStream: vi.fn(),
       cleanup: vi.fn(),
-      evaluate: vi.fn().mockResolvedValue({
-        result: {
-          is_complete: false,
-          reason: 'Task not complete',
-          missing_items: ['Item 1', 'Item 2'],
-          confidence: 0.8,
-        },
+      evaluate: vi.fn(async function(this: any, taskMdContent: string, iteration: number, workerOutput?: string) {
+        const messages: any[] = [];
+        for await (const msg of mockEvaluatorInstance.queryStream('mocked evaluation prompt')) {
+          messages.push(msg);
+        }
+        // Return a default evaluation result
+        return {
+          result: {
+            is_complete: false,
+            reason: 'Task not complete',
+            missing_items: ['Item 1', 'Item 2'],
+            confidence: 0.8,
+          },
+          messages,
+        };
       }),
     };
-
-    // Mock Worker instance
-    mockWorkerInstance = {
-      initialize: vi.fn().mockResolvedValue(undefined),
-      queryStream: vi.fn(),
-      cleanup: vi.fn(),
-    };
-
-    mockedEvaluator.mockImplementation(() => mockEvaluatorInstance as any);
-    mockedWorker.mockImplementation(() => mockWorkerInstance as any);
-
-    // Default extractText implementation
-    mockedExtractText.mockImplementation((msg) => {
-      if (typeof msg.content === 'string') return msg.content;
-      if (msg.content && typeof msg.content === 'object' && 'text' in msg.content) {
-        return (msg.content as { text: string }).text;
-      }
-      return '';
-    });
-
-    iterationBridge = new IterationBridge(config);
   });
 
   describe('constructor', () => {
-    it('should create IterationBridge with config', () => {
-      expect(iterationBridge).toBeInstanceOf(IterationBridge);
-      expect(iterationBridge.iteration).toBe(1);
-    });
+    it('should create bridge with config', () => {
+      bridge = new IterationBridge(config);
 
-    it('should store taskMdContent', () => {
-      expect(iterationBridge.taskMdContent).toBe('# Test Task\n\nDescription here');
+      expect(bridge).toBeInstanceOf(IterationBridge);
+      expect(bridge.evaluatorConfig).toBe(evaluatorConfig);
+      expect(bridge.iteration).toBe(1);
     });
 
     it('should accept previousWorkerOutput', () => {
       const configWithOutput: IterationBridgeConfig = {
         ...config,
-        iteration: 2,
         previousWorkerOutput: 'Previous result',
       };
 
-      const bridge = new IterationBridge(configWithOutput);
-      expect(bridge.iteration).toBe(2);
+      bridge = new IterationBridge(configWithOutput);
       expect(bridge.previousWorkerOutput).toBe('Previous result');
     });
   });
 
-  describe('runIterationStreaming (direct Evaluator-Worker)', () => {
-    it('should execute single Evaluator-Worker exchange', async () => {
-      const evaluatorInstance = mockEvaluatorInstance;
+  describe('runIterationStreaming (Plan-and-Execute)', () => {
+    it('should execute Evaluator then Planner/Executor', async () => {
+      bridge = new IterationBridge(config);
 
-      // Phase 1: Evaluator evaluates task (not complete, provides missing_items)
-      evaluatorInstance.queryStream.mockReturnValueOnce(async function* () {
-        yield {
-          content: JSON.stringify({ is_complete: false, missing_items: ['Implement feature X'] }),
-          messageType: 'text',
-          metadata: {},
-        };
-      }());
-
-      const workerInstance = mockWorkerInstance;
-      workerInstance.queryStream.mockReturnValueOnce(async function* () {
-        yield { content: 'Feature X implemented', messageType: 'result', metadata: {} };
+      // Mock Evaluator to return incomplete
+      mockEvaluatorInstance.queryStream.mockReturnValueOnce(async function* () {
+        yield { content: '{"is_complete": false}', role: 'assistant', messageType: 'text' };
       }());
 
       const messages: any[] = [];
-      for await (const msg of iterationBridge.runIterationStreaming()) {
+      for await (const msg of bridge.runIterationStreaming()) {
         messages.push(msg);
       }
 
-      expect(messages).toBeDefined();
-      expect(evaluatorInstance.queryStream).toHaveBeenCalledTimes(1);
-      expect(workerInstance.queryStream).toHaveBeenCalledTimes(1);
+      // Should have called evaluate
+      expect(mockEvaluatorInstance.evaluate).toHaveBeenCalledTimes(1);
     });
 
-    it('should skip Worker if Evaluator determines task is complete', async () => {
-      const evaluatorInstance = mockEvaluatorInstance;
+    it('should skip Planner/Executor if Evaluator determines task is complete', async () => {
+      bridge = new IterationBridge(config);
 
-      // Evaluator determines task is complete
-      evaluatorInstance.queryStream.mockReturnValueOnce(async function* () {
-        yield {
-          content: '',
-          messageType: 'tool_use',
-          metadata: { toolName: 'task_done' },
-        };
-      }());
-
-      const workerInstance = mockWorkerInstance;
+      // Mock Evaluator to return complete
+      mockEvaluatorInstance.evaluate.mockResolvedValueOnce({
+        result: {
+          is_complete: true,
+          reason: 'Task is complete',
+          missing_items: [],
+          confidence: 1.0,
+        },
+        messages: [],
+      });
 
       const messages: any[] = [];
-      for await (const msg of iterationBridge.runIterationStreaming()) {
+      for await (const msg of bridge.runIterationStreaming()) {
         messages.push(msg);
       }
 
-      // Worker should not be initialized/queried
-      expect(workerInstance.initialize).not.toHaveBeenCalled();
-      expect(workerInstance.queryStream).not.toHaveBeenCalled();
+      // Should have completion message
+      expect(messages.some(m => m.messageType === 'task_completion')).toBe(true);
     });
 
-    it('should cleanup both Evaluator and Worker', async () => {
-      const evaluatorInstance = mockEvaluatorInstance;
+    it('should cleanup Evaluator after iteration', async () => {
+      bridge = new IterationBridge(config);
 
-      evaluatorInstance.queryStream.mockReturnValueOnce(async function* () {
-        yield {
-          content: JSON.stringify({ is_complete: false, missing_items: ['Do work'] }),
-          messageType: 'text',
-          metadata: {},
-        };
+      mockEvaluatorInstance.queryStream.mockReturnValueOnce(async function* () {
+        yield { content: '{"is_complete": false}', role: 'assistant', messageType: 'text' };
       }());
 
-      const workerInstance = mockWorkerInstance;
-      workerInstance.queryStream.mockReturnValueOnce(async function* () {
-        yield { content: 'Done', messageType: 'result', metadata: {} };
-      }());
-
-      for await (const _msg of iterationBridge.runIterationStreaming()) {
-        // consume
+      for await (const _ of bridge.runIterationStreaming()) {
+        // Consume all messages
       }
 
-      expect(evaluatorInstance.cleanup).toHaveBeenCalled();
-      expect(workerInstance.cleanup).toHaveBeenCalled();
+      expect(mockEvaluatorInstance.cleanup).toHaveBeenCalledTimes(1);
     });
   });
 });

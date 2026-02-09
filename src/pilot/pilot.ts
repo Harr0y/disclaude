@@ -3,7 +3,6 @@
  *
  * The Pilot class handles simple conversational AI interactions without:
  * - Task.md creation (Scout's job)
- * - Long task workflows (LongTaskManager's job)
  * - Command handling (CommandHandlers' job)
  *
  * Instead, Pilot provides:
@@ -113,11 +112,11 @@ export class Pilot {
    * @param text - User's message text
    * @param messageId - Unique message identifier for session resume
    */
-  async enqueueMessage(
+  enqueueMessage(
     chatId: string,
     text: string,
     messageId: string
-  ): Promise<void> {
+  ): void {
     // Initialize queue for this chatId (if not exists)
     if (!this.chatQueues.has(chatId)) {
       this.chatQueues.set(chatId, []);

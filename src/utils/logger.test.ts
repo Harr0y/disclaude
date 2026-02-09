@@ -12,7 +12,6 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import fs from 'fs';
-import pino from 'pino';
 import {
   initLogger,
   resetLogger,

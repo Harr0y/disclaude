@@ -269,14 +269,25 @@ describe('Worker', () => {
         // Consume stream
       }
 
-      const callArgs = mockedQuery.mock.calls[0][0];
-      const allowedTools = callArgs.options.allowedTools as string[];
+      // Check that query was called
+      expect(mockedQuery).toHaveBeenCalled();
+
+      // Get the first call's arguments
+      const firstCall = mockedQuery.mock.calls[0];
+      expect(firstCall).toBeDefined();
+
+      // Extract options from the call
+      const options = firstCall[0]?.options;
+      expect(options).toBeDefined();
+
+      const toolList = options?.allowedTools as string[];
+      expect(toolList).toBeDefined();
 
       // Should contain tools from skill mock
-      expect(allowedTools).toContain('Read');
-      expect(allowedTools).toContain('Write');
-      expect(allowedTools).toContain('Bash');
-      expect(allowedTools).toContain('WebSearch');
+      expect(toolList).toContain('Read');
+      expect(toolList).toContain('Write');
+      expect(toolList).toContain('Bash');
+      expect(toolList).toContain('WebSearch');
     });
   });
 

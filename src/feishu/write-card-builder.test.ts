@@ -315,7 +315,7 @@ describe('parseWriteToolInput', () => {
 
 describe('write card builder edge cases', () => {
   it('should handle very long file paths', () => {
-    const longPath = '/a'.repeat(1000) + '/file.ts';
+    const longPath = `${'/a'.repeat(1000)  }/file.ts`;
     const mockContent: WriteContent = {
       filePath: longPath,
       content: 'content',

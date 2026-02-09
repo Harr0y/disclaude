@@ -1,6 +1,6 @@
 {
   "name": "disclaude",
-  "version": "0.2.2",
+  "version": "0.2.3",
   "description": "Multi-platform agent bot supporting Feishu/Lark and CLI",
   "main": "dist/index.js",
   "type": "module",

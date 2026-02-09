@@ -4,8 +4,7 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import {
-  handleStatusCommand,
-  handleHelpCommand,
+  handleTaskCommand,
   isCommand,
   parseCommand,
   executeCommand,
@@ -21,16 +20,28 @@ vi.mock('../utils/logger.js', () => ({
 }));
 
 describe('isCommand', () => {
-  it('should return true for /status command', () => {
-    expect(isCommand('/status')).toBe(true);
-  });
-
-  it('should return true for /help command', () => {
-    expect(isCommand('/help')).toBe(true);
-  });
-
   it('should return true for /task with arguments', () => {
     expect(isCommand('/task Test task')).toBe(true);
+  });
+
+  it('should return false for /task without arguments', () => {
+    expect(isCommand('/task')).toBe(false);
+  });
+
+  it('should return false for /status', () => {
+    expect(isCommand('/status')).toBe(false);
+  });
+
+  it('should return false for /help', () => {
+    expect(isCommand('/help')).toBe(false);
+  });
+
+  it('should return false for /cancel', () => {
+    expect(isCommand('/cancel')).toBe(false);
+  });
+
+  it('should return false for /reset', () => {
+    expect(isCommand('/reset')).toBe(false);
   });
 
   it('should return false for non-command text', () => {
@@ -39,14 +50,14 @@ describe('isCommand', () => {
 });
 
 describe('parseCommand', () => {
+  it('should parse /task with arguments', () => {
+    const result = parseCommand('/task test');
+    expect(result).toEqual({ command: '/task', args: 'test' });
+  });
+
   it('should parse command without arguments', () => {
     const result = parseCommand('/status');
     expect(result).toEqual({ command: '/status', args: '' });
-  });
-
-  it('should parse command with arguments', () => {
-    const result = parseCommand('/task test');
-    expect(result).toEqual({ command: '/task', args: 'test' });
   });
 
   it('should return null for non-command text', () => {
@@ -55,7 +66,7 @@ describe('parseCommand', () => {
   });
 });
 
-describe('handleStatusCommand', () => {
+describe('handleTaskCommand', () => {
   let mockContext: CommandHandlerContext;
   let mockSendMessage: any;
 
@@ -64,35 +75,21 @@ describe('handleStatusCommand', () => {
     mockContext = {
       chatId: 'oc_test123',
       sendMessage: mockSendMessage,
-      longTaskManagers: new Map(),
     };
   });
 
-  it('should send status message when no task is running', async () => {
-    await handleStatusCommand(mockContext);
+  it('should return success for valid task', async () => {
+    await handleTaskCommand(mockContext, 'Analyze the code');
+    // Should not send error message
+    expect(mockSendMessage).not.toHaveBeenCalled();
+  });
+
+  it('should send usage hint when task is empty', async () => {
+    await handleTaskCommand(mockContext, '');
     expect(mockSendMessage).toHaveBeenCalledWith(
       'oc_test123',
-      expect.stringContaining('No long task')
+      expect.stringContaining('Usage:')
     );
-  });
-});
-
-describe('handleHelpCommand', () => {
-  let mockContext: CommandHandlerContext;
-  let mockSendMessage: any;
-
-  beforeEach(() => {
-    mockSendMessage = vi.fn().mockResolvedValue(undefined);
-    mockContext = {
-      chatId: 'oc_test123',
-      sendMessage: mockSendMessage,
-      longTaskManagers: new Map(),
-    };
-  });
-
-  it('should send help message', async () => {
-    await handleHelpCommand(mockContext);
-    expect(mockSendMessage).toHaveBeenCalled();
   });
 });
 
@@ -105,13 +102,32 @@ describe('executeCommand', () => {
     mockContext = {
       chatId: 'oc_test123',
       sendMessage: mockSendMessage,
-      longTaskManagers: new Map(),
     };
   });
 
-  it('should execute /status command', async () => {
-    const result = await executeCommand(mockContext, '/status');
+  it('should execute /task command', async () => {
+    const result = await executeCommand(mockContext, '/task Analyze code');
     expect(result).toBe(true);
+  });
+
+  it('should return false for /status (passed to SDK)', async () => {
+    const result = await executeCommand(mockContext, '/status');
+    expect(result).toBe(false);
+  });
+
+  it('should return false for /help (passed to SDK)', async () => {
+    const result = await executeCommand(mockContext, '/help');
+    expect(result).toBe(false);
+  });
+
+  it('should return false for /cancel (passed to SDK)', async () => {
+    const result = await executeCommand(mockContext, '/cancel');
+    expect(result).toBe(false);
+  });
+
+  it('should return false for /reset (passed to SDK)', async () => {
+    const result = await executeCommand(mockContext, '/reset');
+    expect(result).toBe(false);
   });
 
   it('should return false for non-command', async () => {

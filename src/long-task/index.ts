@@ -8,7 +8,6 @@
 
 export { TaskPlanner } from './planner.js';
 export { SubtaskExecutor } from './executor.js';
-export { LongTaskManager } from './manager.js';
 export { LongTaskTracker } from './tracker.js';
 export { TaskPlanExtractor } from './task-plan-extractor.js';
 export type {

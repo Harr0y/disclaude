@@ -10,7 +10,7 @@ import { Config } from '../config/index.js';
 import { DEDUPLICATION } from '../config/constants.js';
 import { FeishuOutputAdapter } from '../utils/output-adapter.js';
 import { TaskTracker } from '../utils/task-tracker.js';
-import { LongTaskManager, LongTaskTracker, type TaskPlanData, type DialogueTaskPlan } from '../long-task/index.js';
+import { LongTaskTracker, type TaskPlanData, type DialogueTaskPlan } from '../long-task/index.js';
 import { buildTextContent } from './content-builder.js';
 import { createLogger } from '../utils/logger.js';
 import { handleError, ErrorCategory } from '../utils/error-handler.js';
@@ -80,9 +80,6 @@ export class FeishuBot extends EventEmitter {
 
   // Long task tracker for dialogue task plans
   private longTaskTracker: LongTaskTracker;
-
-  // Active long task managers per chat (one per chat to avoid conflicts)
-  private longTaskManagers = new Map<string, LongTaskManager>();
 
   // Active dialogue bridges per chat
   private activeDialogues = new Map<string, DialogueOrchestrator>();
@@ -287,8 +284,12 @@ export class FeishuBot extends EventEmitter {
 
     // Create output adapter for Scout phase
     const scoutAdapter = new FeishuOutputAdapter({
-      sendMessage: async (id: string, msg: string) => this.sendMessage(id, msg),
-      sendCard: async (id: string, card: Record<string, unknown>) => this.sendCard(id, card),
+      sendMessage: async (id: string, msg: string) => {
+        await this.sendMessage(id, msg);
+      },
+      sendCard: async (id: string, card: Record<string, unknown>) => {
+        await this.sendCard(id, card);
+      },
       chatId,
       sendFile: this.sendFileToUser.bind(this, chatId),
     });
@@ -319,16 +320,25 @@ export class FeishuBot extends EventEmitter {
     }
 
     // === FLOW 2: Execute dialogue ===
-    // The bridge will create fresh Evaluator/Manager/Worker instances per iteration (P0 Architecture)
+    // The bridge will create fresh Evaluator/Planner/Executor instances per iteration (P0 Architecture)
     // Import MCP tools to set message tracking callback
     const { setMessageSentCallback } = await import('../mcp/feishu-context-mcp.js');
 
     // Create bridge with agent configs (not instances)
     const bridge = new DialogueOrchestrator({
-      workerConfig: {
+      plannerConfig: {
         apiKey: agentConfig.apiKey,
         model: agentConfig.model,
         apiBaseUrl: agentConfig.apiBaseUrl,
+      },
+      executorConfig: {
+        apiKey: agentConfig.apiKey,
+        model: agentConfig.model,
+        apiBaseUrl: agentConfig.apiBaseUrl,
+        sendMessage: this.sendMessage.bind(this),
+        sendCard: this.sendCard.bind(this),
+        chatId,
+        workspaceBaseDir: Config.getWorkspaceDir(),
       },
       evaluatorConfig: {
         apiKey: agentConfig.apiKey,
@@ -356,11 +366,11 @@ export class FeishuBot extends EventEmitter {
     const adapter = new FeishuOutputAdapter({
       sendMessage: async (id: string, msg: string) => {
         messageTracker.recordMessageSent();  // Track message sending
-        return this.sendMessage(id, msg);
+        await this.sendMessage(id, msg);
       },
       sendCard: async (id: string, card: Record<string, unknown>) => {
         messageTracker.recordMessageSent();  // Track card sending
-        return this.sendCard(id, card);
+        await this.sendCard(id, card);
       },
       chatId,
       sendFile: this.sendFileToUser.bind(this, chatId),
@@ -490,86 +500,6 @@ export class FeishuBot extends EventEmitter {
   /**
    * Handle /long command - start long task workflow.
    */
-  private async handleLongTask(
-    chatId: string,
-    userRequest: string,
-    _messageId?: string
-  ): Promise<void> {
-    try {
-      // Get agent configuration
-      const agentConfig = Config.getAgentConfig();
-
-      // Create or get long task manager for this chat
-      let taskManager = this.longTaskManagers.get(chatId);
-
-      if (taskManager) {
-        await this.sendMessage(
-          chatId,
-          '⚠️ A long task is already running in this chat. Please wait for it to complete or use /cancel to stop it.'
-        );
-        return;
-      }
-
-      // Create new long task manager
-      taskManager = new LongTaskManager(
-        agentConfig.apiKey,
-        agentConfig.model,
-        agentConfig.apiBaseUrl,
-        {
-          workspaceBaseDir: Config.getWorkspaceDir(),
-          sendMessage: this.sendMessage.bind(this),
-          sendCard: this.sendCard.bind(this),
-          chatId,
-          apiBaseUrl: agentConfig.apiBaseUrl,
-          // Add 24-hour timeout for long tasks
-          taskTimeoutMs: 24 * 60 * 60 * 1000,
-        }
-      );
-
-      // Set manager in map BEFORE starting to prevent race condition
-      this.longTaskManagers.set(chatId, taskManager);
-
-      // Start long task workflow (non-blocking)
-      taskManager.startLongTask(userRequest)
-        .then(() => {
-          this.logger.info({ chatId }, 'Long task completed');
-        })
-        .catch((error) => {
-          handleError(error, {
-            category: ErrorCategory.SDK,
-            chatId,
-            userMessage: 'Long task failed'
-          }, {
-            log: true,
-            customLogger: this.logger
-          });
-        })
-        .finally(() => {
-          // Clean up manager after completion (only if it's still the same manager)
-          const currentManager = this.longTaskManagers.get(chatId);
-          if (currentManager === taskManager) {
-            this.longTaskManagers.delete(chatId);
-          }
-        });
-
-    } catch (error) {
-      const enriched = handleError(error, {
-        category: ErrorCategory.UNKNOWN,
-        chatId,
-        userMessage: 'Failed to start long task. Please try again.'
-      }, {
-        log: true,
-        customLogger: this.logger
-      });
-
-      const errorMsg = `❌ ${enriched.userMessage || enriched.message}`;
-      await this.sendMessage(chatId, errorMsg);
-
-      // Clean up manager on error
-      this.longTaskManagers.delete(chatId);
-    }
-  }
-
   /**
    * Handle image/file message - download and store for later processing.
    */
@@ -870,20 +800,7 @@ The file is now available for processing. You can use tools like Read to examine
       const commandContext: CommandHandlerContext = {
         chatId: chat_id,
         sendMessage: this.sendMessage.bind(this),
-        longTaskManagers: this.longTaskManagers,
       };
-
-      // Handle special case for /long command (needs additional logic)
-      if (text.trim().startsWith('/long ')) {
-        const longTaskText = text.trim().substring(6).trim();
-        await CommandHandlers.handleLongTaskCommand(commandContext, longTaskText);
-
-        if (longTaskText) {
-          // Proceed with long task setup
-          await this.handleLongTask(chat_id, longTaskText, message_id);
-        }
-        return;
-      }
 
       // Handle special case for /task command (needs additional logic)
       if (text.trim().startsWith('/task ')) {
@@ -891,7 +808,7 @@ The file is now available for processing. You can use tools like Read to examine
         await CommandHandlers.handleTaskCommand(commandContext, taskText);
 
         if (taskText) {
-          // Use existing task flow (Scout → Task.md → Worker/Manager)
+          // Use task flow (Scout → Task.md → DialogueOrchestrator with auto-detection)
           await this.handleTaskFlow(chat_id, taskText, message_id, sender);
         }
         return;

@@ -9,8 +9,6 @@
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { detectFileType, uploadFile } from './file-uploader.js';
-import type { FileType } from './file-uploader.js';
-import * as lark from '@larksuiteoapi/node-sdk';
 import * as fs from 'fs/promises';
 import * as fsStream from 'fs';
 
