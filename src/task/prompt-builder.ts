@@ -2,8 +2,7 @@
  * Prompt Builder Module - Centralized prompt building for Scout agent.
  *
  * This module provides reusable functions for building prompts with context
- * for the Scout agent. Manager and Worker agents receive prompts directly
- * from dialogue-bridge without transformation.
+ * for the Scout agent.
  */
 
 import { createLogger } from '../utils/logger.js';
@@ -20,19 +19,6 @@ export interface TaskContext {
   taskPath: string;
   /** Conversation history (optional) */
   conversationHistory?: string;
-}
-
-/**
- * Task context for Worker agent.
- */
-export interface WorkerTaskContext {
-  chatId: string;
-  messageId: string;
-  taskPath: string;
-  /** User's original request */
-  userPrompt: string;
-  /** Manager's instruction for this iteration */
-  managerInstruction: string;
 }
 
 /**
@@ -65,110 +51,6 @@ export function buildScoutPrompt(
     .replace('{userPrompt}', userPrompt);
 
   return prompt;
-}
-
-/**
- * Build prompt with task context for Worker agent.
- *
- * Unlike Scout, Worker receives a concise prompt without the full Task.md.
- * This reduces verbosity and focuses Worker on the immediate task.
- *
- * @param workerContext - Worker task context object
- * @param skillContent - Optional skill file content for template extraction
- * @returns Formatted prompt with context
- */
-export function buildWorkerPrompt(
-  workerContext: WorkerTaskContext,
-  skillContent?: string
-): string {
-  // Extract prompt template from skill file
-  // The template should be in a section called "## Prompt Template"
-  const promptTemplate = extractWorkerPromptTemplate(skillContent);
-
-  // Replace placeholders in the template
-  const prompt = promptTemplate
-    .replace('{chatId}', workerContext.chatId)
-    .replace('{messageId}', workerContext.messageId)
-    .replace('{taskPath}', workerContext.taskPath)
-    .replace('{userPrompt}', workerContext.userPrompt)
-    .replace('{managerInstruction}', workerContext.managerInstruction);
-
-  return prompt;
-}
-
-/**
- * Extract the Worker prompt template from the worker skill file.
- *
- * Looks for a section titled "## Prompt Template" and returns its content.
- * The template should use placeholders like {chatId}, {messageId}, etc.
- * that will be replaced with actual values.
- *
- * The template is delimited by ~~~PROMPT_TEMPLATE markers to avoid conflicts
- * with nested code blocks that use ``` markers.
- *
- * @param skillContent - Skill file markdown content (optional)
- * @returns Extracted template string or fallback template if not found
- */
-export function extractWorkerPromptTemplate(skillContent?: string): string {
-  if (!skillContent) {
-    logger.warn('Skill content not provided, using fallback Worker template');
-    return getWorkerFallbackTemplate();
-  }
-
-  // Find the "## Prompt Template" section
-  const templateSectionMatch = skillContent.match(/##\s*Prompt\s*\Template\s*\n([\s\S]+)/);
-
-  if (!templateSectionMatch || !templateSectionMatch[1]) {
-    logger.warn('Could not find "## Prompt Template" section in Worker skill file, using fallback');
-    return getWorkerFallbackTemplate();
-  }
-
-  // Extract the template content between ~~~PROMPT_TEMPLATE markers
-  const codeBlockMatch = templateSectionMatch[1].match(/~~~PROMPT_TEMPLATE\n([\s\S]*?)~~~PROMPT_TEMPLATE/);
-
-  if (!codeBlockMatch || !codeBlockMatch[1]) {
-    logger.warn('Could not find PROMPT_TEMPLATE delimiters in Worker skill file, using fallback');
-    return getWorkerFallbackTemplate();
-  }
-
-  return codeBlockMatch[1].trim();
-}
-
-/**
- * Get fallback Worker prompt template when skill file is unavailable.
- * This should rarely happen as skill loading is mandatory.
- *
- * @returns Default template string
- */
-export function getWorkerFallbackTemplate(): string {
-  return `## Task Context
-
-- **Chat ID**: {chatId}
-- **Message ID**: {messageId}
-- **Task Path**: {taskPath}
-
----
-
-## Original Request
-
-\`\`\`
-{userPrompt}
-\`\`\`
-
----
-
-## Manager's Instruction
-
-{managerInstruction}
-
----
-
-## Your Task
-
-Execute according to Manager's instruction above.
-Report what you did and the outcomes.
-
-When you complete your work, the SDK will signal completion automatically.`;
 }
 
 /**
@@ -310,5 +192,5 @@ Task.md must contain ONLY these sections:
 
 Use your exploration and analysis INTERNALLY to inform the Expected Results section, but do NOT write those sections to the file.
 
-**Remember**: You are creating a task specification for Worker to execute, not answering directly.`;
+**Remember**: You are creating a task specification for execution, not answering directly.`;
 }
