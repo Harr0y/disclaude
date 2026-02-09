@@ -1,8 +1,9 @@
 /**
- * Comprehensive tests for SubtaskExecutor class.
+ * Comprehensive tests for Executor class.
  *
  * Tests the following functionality:
- * - Subtask execution with SDK mocking
+ * - Subtask execution with SDK mocking (async generator)
+ * - Progress event yielding (start, output, complete, error)
  * - Abort signal handling before and during execution
  * - Context building from previous results
  * - Execution prompt creation
@@ -11,7 +12,7 @@
  * - Private helper methods via test exposure
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { SubtaskExecutor } from '../../src/long-task/executor.js';
+import { Executor, type SubtaskProgressEvent } from '../../src/long-task/executor.js';
 import type { Subtask, SubtaskResult, LongTaskConfig } from '../../src/long-task/types.js';
 
 // Mock dependencies
@@ -35,20 +36,12 @@ vi.mock('../../src/utils/sdk.js', () => ({
   })),
 }));
 
-vi.mock('../../src/utils/output-adapter.js', () => ({
-  FeishuOutputAdapter: vi.fn().mockImplementation(() => ({
-    write: vi.fn(async () => {}),
-    clearThrottleState: vi.fn(),
-  })),
-}));
-
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import * as fs from 'fs/promises';
-import { FeishuOutputAdapter } from '../../src/utils/output-adapter.js';
 
-describe('SubtaskExecutor', () => {
+describe('Executor', () => {
   let mockConfig: LongTaskConfig;
-  let executor: SubtaskExecutor;
+  let executor: Executor;
   let apiKey: string;
   let model: string;
 
@@ -68,25 +61,36 @@ describe('SubtaskExecutor', () => {
       maxCostUsd: 10.0,
     };
 
-    executor = new SubtaskExecutor(apiKey, model, mockConfig);
+    executor = new Executor(apiKey, model, mockConfig);
 
     // Clear mocks but preserve implementations
     vi.clearAllMocks();
-
-    // Ensure FeishuOutputAdapter mock always has the right implementation
-    vi.mocked(FeishuOutputAdapter).mockImplementation(() => ({
-      write: vi.fn(async () => {}),
-      clearThrottleState: vi.fn(),
-    }));
   });
 
   afterEach(() => {
     vi.restoreAllMocks();
   });
 
+  /**
+   * Helper to consume the async generator and return the final result.
+   * Also collects all yielded events.
+   */
+  async function consumeGenerator(
+    generator: AsyncGenerator<SubtaskProgressEvent, SubtaskResult>
+  ): Promise<{ events: SubtaskProgressEvent[]; result: SubtaskResult }> {
+    const events: SubtaskProgressEvent[] = [];
+    let result: IteratorResult<SubtaskProgressEvent, SubtaskResult>;
+
+    while (!(result = await generator.next()).done) {
+      events.push(result.value);
+    }
+
+    return { events, result: result.value };
+  }
+
   describe('Constructor', () => {
     it('should create executor with API key, model, and config', () => {
-      expect(executor).toBeInstanceOf(SubtaskExecutor);
+      expect(executor).toBeInstanceOf(Executor);
     });
 
     it('should store API key', () => {
@@ -131,12 +135,12 @@ describe('SubtaskExecutor', () => {
       vi.mocked(fs.writeFile).mockResolvedValue(undefined);
       vi.mocked(fs.readdir).mockResolvedValue([]);
 
-      const result = await executor.executeSubtask(subtask, [], '/workspace');
+      const generator = executor.executeSubtask(subtask, [], '/workspace');
+      const { result, events } = await consumeGenerator(generator);
 
       expect(result.success).toBe(true);
       expect(result.sequence).toBe(1);
       expect(result.summary).toBe('Test response');
-      expect(mockConfig.sendMessage).toHaveBeenCalled();
     });
 
     it('should create subtask directory', async () => {
@@ -167,12 +171,13 @@ describe('SubtaskExecutor', () => {
       vi.mocked(fs.writeFile).mockResolvedValue(undefined);
       vi.mocked(fs.readdir).mockResolvedValue([]);
 
-      await executor.executeSubtask(subtask, [], '/workspace');
+      const generator = executor.executeSubtask(subtask, [], '/workspace');
+      await consumeGenerator(generator);
 
       expect(fs.mkdir).toHaveBeenCalledWith('/workspace/subtask-1', { recursive: true });
     });
 
-    it('should send progress update message', async () => {
+    it('should yield start event with correct data', async () => {
       const subtask: Subtask = {
         sequence: 1,
         title: 'Test Subtask',
@@ -200,15 +205,19 @@ describe('SubtaskExecutor', () => {
       vi.mocked(fs.writeFile).mockResolvedValue(undefined);
       vi.mocked(fs.readdir).mockResolvedValue([]);
 
-      await executor.executeSubtask(subtask, [], '/workspace');
+      const generator = executor.executeSubtask(subtask, [], '/workspace');
+      const { events } = await consumeGenerator(generator);
 
-      expect(mockConfig.sendMessage).toHaveBeenCalledWith(
-        'chat-123',
-        expect.stringContaining('Step 1/5')
-      );
+      expect(events[0]).toMatchObject({
+        type: 'start',
+        sequence: 1,
+        totalSteps: 5,
+        title: 'Test Subtask',
+        description: 'Test description',
+      });
     });
 
-    it('should send completion update message', async () => {
+    it('should yield output events for each SDK message', async () => {
       const subtask: Subtask = {
         sequence: 1,
         title: 'Test Subtask',
@@ -226,7 +235,8 @@ describe('SubtaskExecutor', () => {
 
       const mockQueryResult = {
         [Symbol.asyncIterator]: async function* () {
-          yield { type: 'text', content: 'Test' };
+          yield { type: 'text', content: 'First message' };
+          yield { type: 'text', content: 'Second message' };
         },
       };
 
@@ -236,15 +246,25 @@ describe('SubtaskExecutor', () => {
       vi.mocked(fs.writeFile).mockResolvedValue(undefined);
       vi.mocked(fs.readdir).mockResolvedValue([]);
 
-      await executor.executeSubtask(subtask, [], '/workspace');
+      const generator = executor.executeSubtask(subtask, [], '/workspace');
+      const { events } = await consumeGenerator(generator);
 
-      expect(mockConfig.sendMessage).toHaveBeenCalledWith(
-        'chat-123',
-        expect.stringContaining('Step 1 completed')
-      );
+      // Find output events (after start event, before complete event)
+      const outputEvents = events.filter(e => e.type === 'output');
+      expect(outputEvents).toHaveLength(2);
+      expect(outputEvents[0]).toMatchObject({
+        type: 'output',
+        content: 'First message',
+        messageType: 'text',
+      });
+      expect(outputEvents[1]).toMatchObject({
+        type: 'output',
+        content: 'Second message',
+        messageType: 'text',
+      });
     });
 
-    it('should use FeishuOutputAdapter for streaming', async () => {
+    it('should yield complete event on success', async () => {
       const subtask: Subtask = {
         sequence: 1,
         title: 'Test Subtask',
@@ -270,14 +290,25 @@ describe('SubtaskExecutor', () => {
       vi.mocked(fs.mkdir).mockResolvedValue(undefined);
       vi.mocked(fs.access).mockRejectedValue(new Error('File not found'));
       vi.mocked(fs.writeFile).mockResolvedValue(undefined);
-      vi.mocked(fs.readdir).mockResolvedValue([]);
+      vi.mocked(fs.readdir).mockResolvedValue([
+        { name: 'file1.txt', isFile: () => true, isDirectory: () => false },
+        { name: 'file2.txt', isFile: () => true, isDirectory: () => false },
+      ] as any);
 
-      await executor.executeSubtask(subtask, [], '/workspace');
+      const generator = executor.executeSubtask(subtask, [], '/workspace');
+      const { events } = await consumeGenerator(generator);
 
-      expect(FeishuOutputAdapter).toHaveBeenCalled();
+      const completeEvent = events.find(e => e.type === 'complete');
+      expect(completeEvent).toMatchObject({
+        type: 'complete',
+        sequence: 1,
+        title: 'Test Subtask',
+        files: ['file1.txt', 'file2.txt'],
+        summaryFile: '/workspace/subtask-1/summary.md',
+      });
     });
 
-    it('should clear throttle state for new subtask', async () => {
+    it('should use totalSteps from config in start event', async () => {
       const subtask: Subtask = {
         sequence: 1,
         title: 'Test Subtask',
@@ -299,35 +330,24 @@ describe('SubtaskExecutor', () => {
         },
       };
 
-      const mockAdapter = {
-        write: vi.fn(async () => {}),
-        clearThrottleState: vi.fn(),
-      };
-
-      vi.mocked(FeishuOutputAdapter).mockImplementation(() => mockAdapter as any);
       vi.mocked(query).mockReturnValue(mockQueryResult as any);
       vi.mocked(fs.mkdir).mockResolvedValue(undefined);
       vi.mocked(fs.access).mockRejectedValue(new Error('File not found'));
       vi.mocked(fs.writeFile).mockResolvedValue(undefined);
       vi.mocked(fs.readdir).mockResolvedValue([]);
 
-      await executor.executeSubtask(subtask, [], '/workspace');
+      const generator = executor.executeSubtask(subtask, [], '/workspace');
+      const { events } = await consumeGenerator(generator);
 
-      expect(mockAdapter.clearThrottleState).toHaveBeenCalled();
+      expect(events[0]).toMatchObject({
+        type: 'start',
+        totalSteps: 5,
+      });
     });
-  });
 
-  describe('executeSubtask - Abort Handling', () => {
-    it('should throw AbortError if signal already aborted before execution', async () => {
-      const abortController = new AbortController();
-      abortController.abort();
-
-      const configWithAbort = {
-        ...mockConfig,
-        abortSignal: abortController.signal,
-      };
-
-      const executorWithAbort = new SubtaskExecutor(apiKey, model, configWithAbort);
+    it('should use 0 for totalSteps when not provided in config', async () => {
+      const configWithoutTotal = { ...mockConfig, totalSteps: undefined };
+      const executorWithoutTotal = new Executor(apiKey, model, configWithoutTotal);
 
       const subtask: Subtask = {
         sequence: 1,
@@ -344,8 +364,58 @@ describe('SubtaskExecutor', () => {
         },
       };
 
-      await expect(executorWithAbort.executeSubtask(subtask, [], '/workspace'))
-        .rejects.toThrow('AbortError');
+      const mockQueryResult = {
+        [Symbol.asyncIterator]: async function* () {
+          yield { type: 'text', content: 'Test' };
+        },
+      };
+
+      vi.mocked(query).mockReturnValue(mockQueryResult as any);
+      vi.mocked(fs.mkdir).mockResolvedValue(undefined);
+      vi.mocked(fs.access).mockRejectedValue(new Error('File not found'));
+      vi.mocked(fs.writeFile).mockResolvedValue(undefined);
+      vi.mocked(fs.readdir).mockResolvedValue([]);
+
+      const generator = executorWithoutTotal.executeSubtask(subtask, [], '/workspace');
+      const { events } = await consumeGenerator(generator);
+
+      expect(events[0]).toMatchObject({
+        type: 'start',
+        totalSteps: 0,
+      });
+    });
+  });
+
+  describe('executeSubtask - Abort Handling', () => {
+    it('should throw AbortError if signal already aborted before execution', async () => {
+      const abortController = new AbortController();
+      abortController.abort();
+
+      const configWithAbort = {
+        ...mockConfig,
+        abortSignal: abortController.signal,
+      };
+
+      const executorWithAbort = new Executor(apiKey, model, configWithAbort);
+
+      const subtask: Subtask = {
+        sequence: 1,
+        title: 'Test Subtask',
+        description: 'Test description',
+        inputs: {
+          description: 'Test input',
+          sources: [],
+        },
+        outputs: {
+          description: 'Test output',
+          files: ['out.txt'],
+          summaryFile: 'summary.md',
+        },
+      };
+
+      const generator = executorWithAbort.executeSubtask(subtask, [], '/workspace');
+
+      await expect(consumeGenerator(generator)).rejects.toThrow('AbortError');
     });
 
     it('should throw AbortError if signal aborted during execution', async () => {
@@ -356,7 +426,7 @@ describe('SubtaskExecutor', () => {
         abortSignal: abortController.signal,
       };
 
-      const executorWithAbort = new SubtaskExecutor(apiKey, model, configWithAbort);
+      const executorWithAbort = new Executor(apiKey, model, configWithAbort);
 
       const subtask: Subtask = {
         sequence: 1,
@@ -384,44 +454,9 @@ describe('SubtaskExecutor', () => {
       vi.mocked(query).mockReturnValue(mockQueryResult as any);
       vi.mocked(fs.mkdir).mockResolvedValue(undefined);
 
-      await expect(executorWithAbort.executeSubtask(subtask, [], '/workspace'))
-        .rejects.toThrow('AbortError');
-    });
+      const generator = executorWithAbort.executeSubtask(subtask, [], '/workspace');
 
-    it('should not send error message for AbortError', async () => {
-      const abortController = new AbortController();
-      abortController.abort();
-
-      const configWithAbort = {
-        ...mockConfig,
-        abortSignal: abortController.signal,
-      };
-
-      const executorWithAbort = new SubtaskExecutor(apiKey, model, configWithAbort);
-
-      const subtask: Subtask = {
-        sequence: 1,
-        title: 'Test Subtask',
-        description: 'Test description',
-        inputs: {
-          description: 'Test input',
-          sources: [],
-        },
-        outputs: {
-          description: 'Test output',
-          files: ['out.txt'],
-          summaryFile: 'summary.md',
-        },
-      };
-
-      await expect(executorWithAbort.executeSubtask(subtask, [], '/workspace'))
-        .rejects.toThrow();
-
-      // Should not send error message for abort
-      expect(mockConfig.sendMessage).not.toHaveBeenCalledWith(
-        'chat-123',
-        expect.stringContaining('failed')
-      );
+      await expect(consumeGenerator(generator)).rejects.toThrow('AbortError');
     });
 
     it('should clean up abort listener after execution', async () => {
@@ -432,7 +467,7 @@ describe('SubtaskExecutor', () => {
         abortSignal: abortController.signal,
       };
 
-      const executorWithAbort = new SubtaskExecutor(apiKey, model, configWithAbort);
+      const executorWithAbort = new Executor(apiKey, model, configWithAbort);
 
       const subtask: Subtask = {
         sequence: 1,
@@ -461,10 +496,11 @@ describe('SubtaskExecutor', () => {
       vi.mocked(fs.writeFile).mockResolvedValue(undefined);
       vi.mocked(fs.readdir).mockResolvedValue([]);
 
-      await executorWithAbort.executeSubtask(subtask, [], '/workspace');
+      const generator = executorWithAbort.executeSubtask(subtask, [], '/workspace');
+      const { result } = await consumeGenerator(generator);
 
-      // Listener should be removed (can't directly test this, but execution completes)
-      expect(mockConfig.sendMessage).toHaveBeenCalled();
+      // Execution completes successfully
+      expect(result.success).toBe(true);
     });
   });
 
@@ -494,14 +530,15 @@ describe('SubtaskExecutor', () => {
       vi.mocked(query).mockReturnValue(mockQueryResult as any);
       vi.mocked(fs.mkdir).mockResolvedValue(undefined);
 
-      const result = await executor.executeSubtask(subtask, [], '/workspace');
+      const generator = executor.executeSubtask(subtask, [], '/workspace');
+      const { result, events } = await consumeGenerator(generator);
 
       expect(result.success).toBe(false);
       expect(result.error).toBe('SDK Error');
       expect(result.sequence).toBe(1);
     });
 
-    it('should send error message on failure', async () => {
+    it('should yield error event on failure', async () => {
       const subtask: Subtask = {
         sequence: 1,
         title: 'Test Subtask',
@@ -526,12 +563,16 @@ describe('SubtaskExecutor', () => {
       vi.mocked(query).mockReturnValue(mockQueryResult as any);
       vi.mocked(fs.mkdir).mockResolvedValue(undefined);
 
-      await executor.executeSubtask(subtask, [], '/workspace');
+      const generator = executor.executeSubtask(subtask, [], '/workspace');
+      const { events } = await consumeGenerator(generator);
 
-      expect(mockConfig.sendMessage).toHaveBeenCalledWith(
-        'chat-123',
-        expect.stringContaining('Step 1 failed')
-      );
+      const errorEvent = events.find(e => e.type === 'error');
+      expect(errorEvent).toMatchObject({
+        type: 'error',
+        sequence: 1,
+        title: 'Test Subtask',
+        error: 'Test error',
+      });
     });
 
     it('should handle non-Error objects', async () => {
@@ -559,7 +600,8 @@ describe('SubtaskExecutor', () => {
       vi.mocked(query).mockReturnValue(mockQueryResult as any);
       vi.mocked(fs.mkdir).mockResolvedValue(undefined);
 
-      const result = await executor.executeSubtask(subtask, [], '/workspace');
+      const generator = executor.executeSubtask(subtask, [], '/workspace');
+      const { result } = await consumeGenerator(generator);
 
       expect(result.success).toBe(false);
       expect(result.error).toBe('String error');
@@ -593,7 +635,8 @@ describe('SubtaskExecutor', () => {
       vi.mocked(fs.writeFile).mockResolvedValue(undefined);
       vi.mocked(fs.readdir).mockResolvedValue([]);
 
-      await executor.executeSubtask(subtask, [], '/workspace');
+      const generator = executor.executeSubtask(subtask, [], '/workspace');
+      await consumeGenerator(generator);
 
       expect(fs.writeFile).toHaveBeenCalledWith(
         '/workspace/subtask-1/summary.md',
@@ -629,7 +672,8 @@ describe('SubtaskExecutor', () => {
       vi.mocked(fs.access).mockResolvedValue(undefined); // File exists
       vi.mocked(fs.readdir).mockResolvedValue([]);
 
-      await executor.executeSubtask(subtask, [], '/workspace');
+      const generator = executor.executeSubtask(subtask, [], '/workspace');
+      await consumeGenerator(generator);
 
       expect(fs.writeFile).not.toHaveBeenCalled();
     });
@@ -671,10 +715,11 @@ describe('SubtaskExecutor', () => {
       vi.mocked(fs.writeFile).mockResolvedValue(undefined);
       vi.mocked(fs.readdir).mockResolvedValue([]);
 
-      await executor.executeSubtask(subtask, [], '/workspace');
+      const generator = executor.executeSubtask(subtask, [], '/workspace');
+      await consumeGenerator(generator);
 
-      // Should track the file
-      expect(mockConfig.sendMessage).toHaveBeenCalled();
+      // Should track the file internally (file tracking logic)
+      expect(mockConfig.sendMessage).not.toHaveBeenCalled(); // Executor no longer sends messages
     });
 
     it('should track files from Edit tool metadata', async () => {
@@ -712,9 +757,10 @@ describe('SubtaskExecutor', () => {
       vi.mocked(fs.writeFile).mockResolvedValue(undefined);
       vi.mocked(fs.readdir).mockResolvedValue([]);
 
-      await executor.executeSubtask(subtask, [], '/workspace');
+      const generator = executor.executeSubtask(subtask, [], '/workspace');
+      await consumeGenerator(generator);
 
-      expect(mockConfig.sendMessage).toHaveBeenCalled();
+      expect(mockConfig.sendMessage).not.toHaveBeenCalled(); // Executor no longer sends messages
     });
 
     it('should list created files in result', async () => {
@@ -748,7 +794,8 @@ describe('SubtaskExecutor', () => {
         { name: 'file2.txt', isFile: () => true, isDirectory: () => false },
       ] as any);
 
-      const result = await executor.executeSubtask(subtask, [], '/workspace');
+      const generator = executor.executeSubtask(subtask, [], '/workspace');
+      const { result } = await consumeGenerator(generator);
 
       expect(result.files).toEqual(['file1.txt', 'file2.txt']);
     });
@@ -1137,7 +1184,6 @@ describe('SubtaskExecutor', () => {
 
       const files = await executor['listCreatedFiles']('/workspace');
 
-      // Files are processed in order: file1.txt, then dir1 is processed recursively (adding dir1/dir1file.txt), then file2.txt
       expect(files).toContain('file1.txt');
       expect(files).toContain('file2.txt');
       expect(files).toContain('dir1/dir1file.txt');
@@ -1185,87 +1231,12 @@ describe('SubtaskExecutor', () => {
       vi.mocked(fs.writeFile).mockResolvedValue(undefined);
       vi.mocked(fs.readdir).mockResolvedValue([]);
 
-      await executor.executeSubtask(subtask, previousResults, '/workspace');
+      const generator = executor.executeSubtask(subtask, previousResults, '/workspace');
+      await consumeGenerator(generator);
 
       // Should have included context in the prompt
-      expect(mockConfig.sendMessage).toHaveBeenCalled();
-    });
-  });
-
-  describe('executeSubtask - Total Steps Display', () => {
-    it('should display "?" when totalSteps is undefined', async () => {
-      const configWithoutTotal = { ...mockConfig, totalSteps: undefined };
-      const executorWithoutTotal = new SubtaskExecutor(apiKey, model, configWithoutTotal);
-
-      const subtask: Subtask = {
-        sequence: 1,
-        title: 'Test Subtask',
-        description: 'Test description',
-        inputs: {
-          description: 'Test input',
-          sources: [],
-        },
-        outputs: {
-          description: 'Test output',
-          files: ['out.txt'],
-          summaryFile: 'summary.md',
-        },
-      };
-
-      const mockQueryResult = {
-        [Symbol.asyncIterator]: async function* () {
-          yield { type: 'text', content: 'Test' };
-        },
-      };
-
-      vi.mocked(query).mockReturnValue(mockQueryResult as any);
-      vi.mocked(fs.mkdir).mockResolvedValue(undefined);
-      vi.mocked(fs.access).mockRejectedValue(new Error('File not found'));
-      vi.mocked(fs.writeFile).mockResolvedValue(undefined);
-      vi.mocked(fs.readdir).mockResolvedValue([]);
-
-      await executorWithoutTotal.executeSubtask(subtask, [], '/workspace');
-
-      expect(mockConfig.sendMessage).toHaveBeenCalledWith(
-        'chat-123',
-        expect.stringContaining('Step 1/?')
-      );
-    });
-
-    it('should display total steps when defined', async () => {
-      const subtask: Subtask = {
-        sequence: 1,
-        title: 'Test Subtask',
-        description: 'Test description',
-        inputs: {
-          description: 'Test input',
-          sources: [],
-        },
-        outputs: {
-          description: 'Test output',
-          files: ['out.txt'],
-          summaryFile: 'summary.md',
-        },
-      };
-
-      const mockQueryResult = {
-        [Symbol.asyncIterator]: async function* () {
-          yield { type: 'text', content: 'Test' };
-        },
-      };
-
-      vi.mocked(query).mockReturnValue(mockQueryResult as any);
-      vi.mocked(fs.mkdir).mockResolvedValue(undefined);
-      vi.mocked(fs.access).mockRejectedValue(new Error('File not found'));
-      vi.mocked(fs.writeFile).mockResolvedValue(undefined);
-      vi.mocked(fs.readdir).mockResolvedValue([]);
-
-      await executor.executeSubtask(subtask, [], '/workspace');
-
-      expect(mockConfig.sendMessage).toHaveBeenCalledWith(
-        'chat-123',
-        expect.stringContaining('Step 1/5')
-      );
+      // (we can't directly check this without inspecting the SDK call)
+      expect(mockConfig.sendMessage).not.toHaveBeenCalled(); // Executor no longer sends messages
     });
   });
 
@@ -1299,7 +1270,8 @@ describe('SubtaskExecutor', () => {
       vi.mocked(fs.writeFile).mockResolvedValue(undefined);
       vi.mocked(fs.readdir).mockResolvedValue([]);
 
-      await executor.executeSubtask(subtask, [], '/workspace');
+      const generator = executor.executeSubtask(subtask, [], '/workspace');
+      await consumeGenerator(generator);
 
       // Should use basename only (summary.md, not subtask/summary.md)
       expect(fs.writeFile).toHaveBeenCalledWith(
@@ -1337,7 +1309,8 @@ describe('SubtaskExecutor', () => {
       vi.mocked(fs.writeFile).mockResolvedValue(undefined);
       vi.mocked(fs.readdir).mockResolvedValue([]);
 
-      const result = await executor.executeSubtask(subtask, [], '/workspace');
+      const generator = executor.executeSubtask(subtask, [], '/workspace');
+      const { result } = await consumeGenerator(generator);
 
       expect(result.summaryFile).toBe('/workspace/subtask-1/summary.md');
     });
@@ -1373,7 +1346,8 @@ describe('SubtaskExecutor', () => {
       vi.mocked(fs.readdir).mockResolvedValue([]);
 
       const beforeTime = new Date();
-      const result = await executor.executeSubtask(subtask, [], '/workspace');
+      const generator = executor.executeSubtask(subtask, [], '/workspace');
+      const { result } = await consumeGenerator(generator);
       const afterTime = new Date();
 
       expect(result.completedAt).toBeDefined();
@@ -1408,13 +1382,28 @@ describe('SubtaskExecutor', () => {
       vi.mocked(fs.mkdir).mockResolvedValue(undefined);
 
       const beforeTime = new Date();
-      const result = await executor.executeSubtask(subtask, [], '/workspace');
+      const generator = executor.executeSubtask(subtask, [], '/workspace');
+      const { result } = await consumeGenerator(generator);
       const afterTime = new Date();
 
       expect(result.completedAt).toBeDefined();
       const completionTime = new Date(result.completedAt);
       expect(completionTime.getTime()).toBeGreaterThanOrEqual(beforeTime.getTime());
       expect(completionTime.getTime()).toBeLessThanOrEqual(afterTime.getTime());
+    });
+  });
+
+  describe('SubtaskProgressEvent Type Export', () => {
+    it('should export SubtaskProgressEvent type', () => {
+      // This test ensures the type is exported and available
+      const event: SubtaskProgressEvent = {
+        type: 'start',
+        sequence: 1,
+        totalSteps: 5,
+        title: 'Test',
+        description: 'Test description',
+      };
+      expect(event.type).toBe('start');
     });
   });
 });

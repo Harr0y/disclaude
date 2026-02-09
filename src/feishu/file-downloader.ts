@@ -94,9 +94,49 @@ function getDefaultExtension(fileType?: string): string {
       return '.bin'; // Unknown binary file
     case 'media':
       return '.mp4'; // Most common video format
+    case 'video':
+      return '.mp4'; // Video format
+    case 'audio':
+      return '.mp3'; // Most common audio format
     default:
       return ''; // No default extension
   }
+}
+
+/**
+ * Map internal file type to Feishu API-supported type.
+ *
+ * Feishu messageResource.get API only supports these types:
+ * - 'file' - Generic files
+ * - 'image' - Images
+ * - 'video' - Videos (not 'media'!)
+ * - 'audio' - Audio files
+ *
+ * @param fileType - Internal file type from message
+ * @param fileName - Optional filename to detect special cases
+ * @returns Feishu API-compatible file type
+ */
+function mapToFileType(fileType: string, fileName?: string): string {
+  const typeMap: Record<string, string> = {
+    'file': 'file',
+    'image': 'image',
+    'media': 'video',  // Critical fix: 'media' → 'video'
+    'video': 'video',
+    'audio': 'audio',
+  };
+
+  // Special handling for .MOV files (case-insensitive)
+  // Some MOV files (especially iPhone videos) may not work with 'video' type
+  // Try using 'file' type as fallback for problematic formats
+  if (fileName && fileType === 'media') {
+    const ext = fileName.toLowerCase();
+    // For .mov files, use 'file' type to avoid API errors
+    if (ext.endsWith('.mov')) {
+      return 'file';
+    }
+  }
+
+  return typeMap[fileType] || 'file'; // Default to 'file' for unknown types
 }
 
 /**
@@ -151,15 +191,23 @@ export async function downloadFile(
     // For user-uploaded files in messages, we MUST use messageResource.get API
     // This API retrieves files from messages regardless of who uploaded them
     if (messageId) {
-      logger.debug({ messageId, fileKey, fileType }, 'Downloading message file using message-resource API');
+      logger.debug({ messageId, fileKey, fileType, fileName }, 'Downloading message file using message-resource API');
 
-      fileResource = await client.im.messageResource.get({
-        params: {
-          type: fileType, // File type: image, file, media, etc.
-        },
+      // Map internal file type to Feishu API type
+      // Required params: 'file', 'image', 'video', or 'audio'
+      // Pass fileName to handle special cases like .MOV files
+      const apiFileType = mapToFileType(fileType, fileName);
+
+      logger.debug({ messageId, fileKey, fileType, fileName, apiFileType }, 'Using file type for API call');
+
+      // Type assertion is used because SDK types require params.type
+      fileResource = await (client.im.messageResource.get as any)({
         path: {
           message_id: messageId,
           file_key: fileKey,
+        },
+        params: {
+          type: apiFileType,
         },
       });
     } else if (fileType === 'image') {
@@ -199,8 +247,24 @@ export async function downloadFile(
     logger.info({ fileKey, localPath, size: stats.size }, 'File downloaded successfully');
 
     return localPath;
-  } catch (error) {
-    logger.error({ err: error, fileKey, fileType, messageId }, 'Failed to download file');
+  } catch (error: any) {
+    // Extract detailed error response from Feishu API
+    const errorDetails: any = {
+      fileKey,
+      fileType,
+      messageId,
+      errorMessage: error.message,
+      errorCode: error.code,
+    };
+
+    // Add response data if available
+    if (error.response) {
+      errorDetails.statusCode = error.response.status;
+      errorDetails.statusMessage = error.response.statusText;
+      errorDetails.responseData = error.response.data;
+    }
+
+    logger.error({ err: error, ...errorDetails }, 'Failed to download file');
     throw error;
   }
 }

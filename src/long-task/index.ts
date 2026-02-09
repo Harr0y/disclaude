@@ -7,7 +7,7 @@
  */
 
 export { TaskPlanner } from './planner.js';
-export { SubtaskExecutor } from './executor.js';
+export { Executor } from './executor.js';
 export { LongTaskTracker } from './tracker.js';
 export { TaskPlanExtractor } from './task-plan-extractor.js';
 export type {
@@ -19,6 +19,7 @@ export type {
   LongTaskState,
   SubtaskResult,
   LongTaskConfig,
+  SubtaskProgressEvent,
 } from './types.js';
 export type { TaskPlanData } from './task-plan-extractor.js';
 export type { DialogueTaskPlan } from './tracker.js';

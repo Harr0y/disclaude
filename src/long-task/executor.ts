@@ -1,17 +1,55 @@
 /**
- * Subtask executor - runs individual subtasks with isolated agents.
+ * Executor - runs individual subtasks with isolated agents.
+ *
+ * Refactored to yield progress events instead of handling reporting directly.
+ * The IterationBridge layer connects these events to the Reporter for user communication.
  */
 import * as fs from 'fs/promises';
 import * as path from 'path';
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { createAgentSdkOptions, parseSDKMessage } from '../utils/sdk.js';
-import { FeishuOutputAdapter } from '../utils/output-adapter.js';
 import type { Subtask, SubtaskResult, LongTaskConfig } from './types.js';
+import type { ParsedSDKMessage } from '../types/agent.js';
+
+/**
+ * Progress event type for subtask execution.
+ * These events are yielded during execution and passed to the Reporter by the IterationBridge.
+ */
+export type SubtaskProgressEvent =
+  | {
+      type: 'start';
+      sequence: number;
+      totalSteps: number;
+      title: string;
+      description: string;
+    }
+  | {
+      type: 'output';
+      content: string;
+      messageType: string;
+      metadata?: ParsedSDKMessage['metadata'];
+    }
+  | {
+      type: 'complete';
+      sequence: number;
+      title: string;
+      files: string[];
+      summaryFile: string;
+    }
+  | {
+      type: 'error';
+      sequence: number;
+      title: string;
+      error: string;
+    };
 
 /**
  * Executor for running individual subtasks.
+ *
+ * Yields progress events during execution without handling user communication.
+ * All reporting is delegated to the Reporter via the IterationBridge layer.
  */
-export class SubtaskExecutor {
+export class Executor {
   private readonly apiKey: string;
   private readonly model: string;
   private readonly config: LongTaskConfig;
@@ -24,12 +62,20 @@ export class SubtaskExecutor {
 
   /**
    * Execute a single subtask with a fresh agent.
+   *
+   * Yields progress events during execution:
+   * - 'start': When the subtask begins
+   * - 'output': For each message from the agent
+   * - 'complete': When the subtask succeeds
+   * - 'error': When the subtask fails
+   *
+   * Returns the final SubtaskResult when complete.
    */
-  async executeSubtask(
+  async *executeSubtask(
     subtask: Subtask,
     previousResults: SubtaskResult[],
     workspaceDir: string
-  ): Promise<SubtaskResult> {
+  ): AsyncGenerator<SubtaskProgressEvent, SubtaskResult> {
     const subtaskDir = path.join(workspaceDir, `subtask-${subtask.sequence}`);
 
     // Check for cancellation before starting
@@ -59,28 +105,14 @@ export class SubtaskExecutor {
     const startTime = Date.now();
 
     try {
-      // Send progress update
-      const totalSteps = this.config.totalSteps ?? '?';
-      await this.config.sendMessage(
-        this.config.chatId,
-        `🔄 **Step ${subtask.sequence}/${totalSteps}**: ${subtask.title}\n\n${subtask.description}`
-      );
-
-      // Create Feishu output adapter for streaming messages
-      const adapter = new FeishuOutputAdapter({
-        sendMessage: async (chatId: string, text: string) => {
-          // Prefix message with step context
-          const prefixedText = `[Step ${subtask.sequence}/${totalSteps}] ${text}`;
-          await this.config.sendMessage(chatId, prefixedText);
-        },
-        sendCard: async (chatId: string, card: Record<string, unknown>) => {
-          await this.config.sendCard(chatId, card);
-        },
-        chatId: this.config.chatId,
-      });
-
-      // Clear throttle state for new subtask
-      adapter.clearThrottleState();
+      // Yield start event (reporting layer will format and send to user)
+      yield {
+        type: 'start',
+        sequence: subtask.sequence,
+        totalSteps: this.config.totalSteps ?? 0,
+        title: subtask.title,
+        description: subtask.description,
+      };
 
       // Execute subtask with fresh agent
       const queryResult = query({
@@ -115,17 +147,23 @@ export class SubtaskExecutor {
             fullResponse += parsed.content;
           }
 
-          // Stream message to Feishu using the adapter
-          await adapter.write(parsed.content, parsed.type, {
-            toolName: parsed.metadata?.toolName as string | undefined,
-            toolInputRaw: parsed.metadata?.toolInputRaw as Record<string, unknown> | undefined,
-          });
+          // Yield output event (reporting layer will format and send to user)
+          yield {
+            type: 'output',
+            content: parsed.content,
+            messageType: parsed.type,
+            metadata: parsed.metadata,
+          };
 
           // Track file operations from metadata
           if (parsed.type === 'tool_use' && parsed.metadata?.toolName) {
             if (parsed.metadata.toolName === 'Write' || parsed.metadata.toolName === 'Edit') {
               // Extract file path from tool input if available in metadata
-              if (parsed.metadata.toolInput && typeof parsed.metadata.toolInput === 'string' && parsed.metadata.toolInput.includes('Writing:')) {
+              if (
+                parsed.metadata.toolInput &&
+                typeof parsed.metadata.toolInput === 'string' &&
+                parsed.metadata.toolInput.includes('Writing:')
+              ) {
                 // Parse file path from toolInput format: "Writing: /path/to/file"
                 const match = parsed.metadata.toolInput.match(/Writing:|Editing:\s*(.+)/);
                 if (match && match[1]) {
@@ -161,11 +199,14 @@ export class SubtaskExecutor {
 
       console.log(`[Executor] Completed subtask ${subtask.sequence} in ${duration}ms`);
 
-      // Send completion update
-      await this.config.sendMessage(
-        this.config.chatId,
-        `✅ **Step ${subtask.sequence} completed**: ${subtask.title}\n\n📄 Summary: \`${subtask.outputs.summaryFile}\`\n📁 Created ${files.length} file(s)`
-      );
+      // Yield completion event (reporting layer will format and send to user)
+      yield {
+        type: 'complete',
+        sequence: subtask.sequence,
+        title: subtask.title,
+        files,
+        summaryFile,
+      };
 
       return {
         sequence: subtask.sequence,
@@ -184,11 +225,13 @@ export class SubtaskExecutor {
         throw error; // Re-raise abort error without sending message
       }
 
-      // Send error update
-      await this.config.sendMessage(
-        this.config.chatId,
-        `❌ **Step ${subtask.sequence} failed**: ${subtask.title}\n\nError: ${error instanceof Error ? error.message : String(error)}`
-      );
+      // Yield error event (reporting layer will format and send to user)
+      yield {
+        type: 'error',
+        sequence: subtask.sequence,
+        title: subtask.title,
+        error: error instanceof Error ? error.message : String(error),
+      };
 
       return {
         sequence: subtask.sequence,

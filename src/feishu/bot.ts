@@ -479,22 +479,75 @@ export class FeishuBot extends EventEmitter {
     text: string,
     messageId: string
   ): Promise<string> {
-    // Check if there are pending attachments and include their information
-    let enhancedText = text;
+    // Clear attachments after processing (they were already notified via buildFileUploadPrompt)
     if (attachmentManager.hasAttachments(chatId)) {
-      const attachmentInfo = attachmentManager.formatAttachmentsForPrompt(chatId);
-      if (attachmentInfo) {
-        // Prepend attachment info to the user's message
-        // This ensures the agent knows about the files before processing the user's request
-        enhancedText = `${attachmentInfo}\n\nUser message:\n${text}`;
-        this.logger.debug({ chatId, hasAttachments: true }, 'Enhanced text with attachment info');
-      }
+      attachmentManager.clearAttachments(chatId);
+      this.logger.debug({ chatId }, 'Attachments cleared after system notification');
     }
+
+    // Wrap user message with chatId context
+    // This allows the agent to know which chat it's responding to
+    // IMPORTANT: Format is explicit for tool parameter extraction
+    const enhancedText = `You are responding in a Feishu chat.
+
+**Chat ID for sending files/messages:** ${chatId}
+
+When using tools like send_file_to_feishu or send_user_feedback, use this exact Chat ID value.
+
+--- User Message ---
+${text}`;
 
     // Delegate to Pilot for streaming chat
     await this.pilot.enqueueMessage(chatId, enhancedText, messageId);
 
     return '';
+  }
+
+  /**
+   * Build a structured prompt for file upload notification.
+   *
+   * This creates a special prompt format that includes file metadata
+   * in a structured way, making it easier for the Pilot agent to understand
+   * and process uploaded files.
+   *
+   * @param attachment - File attachment metadata
+   * @returns Structured prompt string
+   */
+  private buildFileUploadPrompt(attachment: FileAttachment): string {
+    const lines: string[] = [];
+
+    // Header with special marker for file uploads
+    lines.push('🔔 SYSTEM: User uploaded a file');
+    lines.push('');
+
+    // Structured metadata block
+    lines.push('```file_metadata');
+    lines.push(`file_name: ${attachment.fileName || 'unknown'}`);
+    lines.push(`file_type: ${attachment.fileType}`);
+    lines.push(`file_key: ${attachment.fileKey}`);
+
+    if (attachment.localPath) {
+      lines.push(`local_path: ${attachment.localPath}`);
+    }
+
+    if (attachment.fileSize) {
+      const sizeMB = (attachment.fileSize / 1024 / 1024).toFixed(2);
+      lines.push(`file_size_mb: ${sizeMB}`);
+    }
+
+    if (attachment.mimeType) {
+      lines.push(`mime_type: ${attachment.mimeType}`);
+    }
+
+    lines.push('```');
+    lines.push('');
+
+    // Context for the agent
+    lines.push('The user has uploaded a file. It is now available at the local path above.');
+    lines.push('');
+    lines.push('Please wait for the user\'s instructions on how to process this file.');
+
+    return lines.join('\n');
   }
 
   /**
@@ -566,31 +619,21 @@ export class FeishuBot extends EventEmitter {
         attachmentManager.addAttachment(chatId, attachment);
 
         // Send confirmation to user
-        const count = attachmentManager.getAttachmentCount(chatId);
         const sizeText = attachment.fileSize
           ? `(${(attachment.fileSize / 1024 / 1024).toFixed(2)} MB)`
           : '';
 
-        // Add local path information if available
-        const pathInfo = attachment.localPath
-          ? `\n📁 Local path: \`${attachment.localPath}\``
-          : '';
-
         await this.sendMessage(
           chatId,
-          `✅ File received: ${attachment.fileName || messageType} ${sizeText}${pathInfo}\n\nPlease send a text command to process this file.\n\nPending files: ${count}`
+          `✅ File received: ${attachment.fileName || messageType} ${sizeText}`
         );
 
         this.logger.info({ chatId, fileKey, localPath }, 'File downloaded and stored');
 
-        // Send a prompt to the agent about the newly uploaded file
+        // Send a structured prompt to the agent about the newly uploaded file
         // This informs the agent immediately that a file is available, even before the user sends a text message
-        const filePrompt = `User uploaded a file: ${attachment.fileName || messageType}
-Type: ${messageType}
-File key: ${fileKey}
-Local path: ${localPath}${attachment.fileSize ? `\nSize: ${(attachment.fileSize / 1024 / 1024).toFixed(2)} MB` : ''}
-
-The file is now available for processing. You can use tools like Read to examine its contents.`;
+        // The prompt uses a structured format with metadata for better file handling
+        const filePrompt = this.buildFileUploadPrompt(attachment);
 
         // Queue the file notification message to the Pilot
         await this.pilot.enqueueMessage(chatId, filePrompt, `file-${messageId}`);

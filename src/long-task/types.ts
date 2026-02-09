@@ -2,6 +2,9 @@
  * Type definitions for long task mechanism.
  */
 
+// Re-export SubtaskProgressEvent from executor
+export type { SubtaskProgressEvent } from './executor.js';
+
 /**
  * Input specification for a subtask.
  */

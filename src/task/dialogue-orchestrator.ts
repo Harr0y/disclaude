@@ -23,9 +23,9 @@
  * ## Plan-and-Execute Flow
  *
  * - TaskPlanner breaks down complex tasks into subtasks
- * - SubtaskExecutor executes each subtask with fresh Worker instances
+ * - Executor executes each subtask with fresh Worker instances
  * - Simple tasks: Worker executes directly
- * - Complex tasks: TaskPlanner + SubtaskExecutor coordinate
+ * - Complex tasks: TaskPlanner + Executor coordinate
  * - Sequential handoff with context passing
  * - Results aggregated for final output
  *
@@ -79,7 +79,7 @@ export interface DialogueOrchestratorConfig {
  * NEW Streaming Flow:
  * 1. Each iteration: Evaluator and Planner/Executor run via IterationBridge
  * 2. Evaluator evaluates completion → Planner/Executor plans and executes
- * 3. For complex tasks: TaskPlanner breaks down → SubtaskExecutor executes subtasks
+ * 3. For complex tasks: TaskPlanner breaks down → Executor executes subtasks
  * 4. For simple tasks: Worker executes directly
  * 5. When execution completes, iteration ends
  * 6. Loop continues until max iterations reached

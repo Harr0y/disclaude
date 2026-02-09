@@ -14,13 +14,16 @@ npm run lint:fix     # ESLint with auto-fix
 npm run test         # Run tests
 
 # === Production (PM2) ===
-npm run pm2:start    # Build and start PM2 service
-npm run pm2:restart  # Restart after code changes (manual only - not automatic)
-npm run pm2:reload   # Zero-downtime reload
-npm run pm2:logs     # View logs
-npm run pm2:status   # Check status
-npm run pm2:stop     # Stop service
-npm run pm2:delete   # Remove from PM2
+npm run pm2:start     # Build and start PM2 service
+npm run pm2:restart   # Restart after code changes (manual only - not automatic)
+npm run pm2:reload    # Zero-downtime reload
+npm run pm2:logs      # View logs (nostream mode - default, shows current logs)
+npm run pm2:logs:follow # View logs with live tail (follow mode)
+npm run pm2:logs:err  # View error logs only (nostream)
+npm run pm2:logs:out  # View output logs only (nostream)
+npm run pm2:status    # Check status
+npm run pm2:stop      # Stop service
+npm run pm2:delete    # Remove from PM2
 
 # === CLI usage ===
 disclaude feishu              # Start Feishu bot
@@ -432,8 +435,31 @@ console.log('[DEBUG]', { context });
 
 ### Check PM2 Logs
 
+**IMPORTANT: Always use `--nostream` mode when checking logs programmatically or via Agent.**
+
 ```bash
-# All logs
+# ✅ Recommended: Use npm scripts (default nostream mode)
+npm run pm2:logs        # All logs (nostream, shows current logs)
+npm run pm2:logs:err    # Error logs only (nostream)
+npm run pm2:logs:out    # Output logs only (nostream)
+npm run pm2:logs:follow # Live tail mode (follow, for manual monitoring)
+
+# ❌ Avoid: Direct PM2 commands without --nostream
+# pm2 logs disclaude-feishu  # This will hang waiting for Ctrl+C!
+
+# ✅ If using PM2 directly, ALWAYS add --nostream
+pm2 logs disclaude-feishu --nostream       # All logs
+pm2 logs disclaude-feishu --nostream --err # Errors only
+pm2 logs disclaude-feishu --nostream --lines 100 # Last 100 lines
+
+# 🔧 For manual monitoring (follow mode)
+pm2 logs disclaude-feishu  # Follows logs in real-time (Ctrl+C to exit)
+```
+
+**Why `--nostream` matters:**
+- **Without `--nostream`**: PM2 enters "follow mode" and streams logs indefinitely, blocking the command until manually interrupted (Ctrl+C)
+- **With `--nostream`**: PM2 outputs current logs and exits immediately - perfect for automation and Agent use
+- **Default npm scripts**: All `pm2:logs` commands use `--nostream` by default, except `pm2:logs:follow` which intentionally uses follow mode
 npm run pm2:logs
 
 # Errors only

@@ -32,6 +32,7 @@
 
 import { Config } from '../config/index.js';
 import { createLogger } from '../utils/logger.js';
+import { feishuSdkMcpServer } from '../mcp/feishu-context-mcp.js';
 
 /**
  * Pending message in the chat queue.
@@ -213,6 +214,12 @@ export class Pilot {
       apiBaseUrl: agentConfig.apiBaseUrl,
       permissionMode: 'bypassPermissions',
     });
+
+    // Add Feishu MCP server for send_file_to_feishu tool
+    // This provides the file sending capability without overriding allowedTools
+    (sdkOptions as any).mcpServers = {
+      'feishu-context': feishuSdkMcpServer,
+    };
 
     this.logger.info({ chatId }, 'Starting streaming chat');
 

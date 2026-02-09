@@ -2,50 +2,45 @@
  * Tool configuration for Claude Agent SDK.
  *
  * This module defines the allowed tools and agent subagents for SDK integration.
+ *
+ * NOTE: MCP tools (e.g., Playwright, Feishu context) are NOT included here.
+ * Individual agents configure MCP servers via getSkillMcpServers() in skill-loader.ts.
  */
 
 /**
- * Core SDK tools that are always enabled
+ * All default SDK tools enabled for agents.
+ *
+ * This includes all built-in Claude Agent SDK tools except browser/OCR MCP tools
+ * which are configured separately by agents that need them.
  */
-export const CORE_TOOLS = [
+export const ALLOWED_TOOLS = [
+  // Skills & Agents
   'Skill',
-  'WebSearch',
   'Task',
+  'ExitPlanMode',
+
+  // Web & Network
+  'WebSearch',
+  'WebFetch',
+
+  // File Operations
   'Read',
   'Write',
   'Edit',
-  'Bash',
+
+  // Search & Navigation
   'Glob',
   'Grep',
-] as const;
+  'LSP',
 
-/**
- * Playwright MCP browser automation tools
- */
-export const PLAYWRIGHT_TOOLS = [
-  'mcp__playwright__browser_navigate',
-  'mcp__playwright__browser_click',
-  'mcp__playwright__browser_snapshot',
-  'mcp__playwright__browser_run_code',
-  'mcp__playwright__browser_close',
-  'mcp__playwright__browser_type',
-  'mcp__playwright__browser_press_key',
-  'mcp__playwright__browser_hover',
-  'mcp__playwright__browser_tabs',
-  'mcp__playwright__browser_take_screenshot',
-  'mcp__playwright__browser_wait_for',
-  'mcp__playwright__browser_evaluate',
-  'mcp__playwright__browser_fill_form',
-  'mcp__playwright__browser_select_option',
-  'mcp__playwright__browser_drag',
-  'mcp__playwright__browser_handle_dialog',
-  'mcp__playwright__browser_network_requests',
-  'mcp__playwright__browser_console_messages',
-  'mcp__playwright__browser_install',
-] as const;
+  // Execution
+  'Bash',
 
-/**
- * All allowed tools for SDK
- */
-export const ALLOWED_TOOLS = [...CORE_TOOLS, ...PLAYWRIGHT_TOOLS];
+  // Jupyter Notebooks
+  'NotebookEdit',
+
+  // User Interaction
+  'AskUserQuestion',
+  'TodoWrite',
+] as const;
 

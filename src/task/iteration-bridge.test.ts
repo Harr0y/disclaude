@@ -15,7 +15,7 @@ import type { EvaluatorConfig } from './evaluator.js';
 // Create mock instances that will be used in tests
 let mockEvaluatorInstance: any;
 
-// Mock Evaluator, TaskPlanner, and SubtaskExecutor classes
+// Mock Evaluator, TaskPlanner, and Executor classes
 vi.mock('./evaluator.js', () => ({
   Evaluator: vi.fn().mockImplementation(() => mockEvaluatorInstance),
 }));
@@ -35,7 +35,7 @@ vi.mock('../long-task/planner.js', () => ({
 }));
 
 vi.mock('../long-task/executor.js', () => ({
-  SubtaskExecutor: vi.fn().mockImplementation(() => ({
+  Executor: vi.fn().mockImplementation(() => ({
     executeSubtask: vi.fn().mockResolvedValue({
       sequence: 1,
       success: true,

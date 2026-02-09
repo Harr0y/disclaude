@@ -29,6 +29,7 @@ export interface UploadResult {
   fileType: FileType;
   fileName: string;
   fileSize: number;
+  apiFileType?: string; // The file_type used for upload API
 }
 
 /**
@@ -101,9 +102,12 @@ export async function uploadFile(
     } else {
       // Use file upload API for other types
       // Note: file_type must be one of: 'mp4', 'opus', 'pdf', 'doc', 'xls', 'ppt', 'stream'
+      // IMPORTANT: msg_type in sendFileMessage must match the file_type used here!
       const apiFileType = fileType === 'video' ? 'mp4' :
                          fileType === 'audio' ? 'opus' :
                          fileType === 'file' ? 'pdf' : 'pdf';
+
+      logger.debug({ fileType, apiFileType }, 'Using file upload API');
 
       // Create a readable stream for the file
       const fileStream = fsStream.createReadStream(filePath);
@@ -115,7 +119,7 @@ export async function uploadFile(
           file: fileStream,
         },
       });
-      logger.debug({ fileKey: response?.file_key }, 'File uploaded');
+      logger.debug({ fileKey: response?.file_key, apiFileType }, 'File uploaded');
     }
 
     // Extract file_key from response (different APIs use different field names)
@@ -129,6 +133,7 @@ export async function uploadFile(
       fileKey,
       fileName,
       fileType,
+      apiFileType: fileType !== 'image' ? (fileType === 'video' ? 'mp4' : fileType === 'audio' ? 'opus' : 'pdf') : undefined,
       size: fileStats.size
     }, 'File uploaded successfully to Feishu');
 
@@ -137,6 +142,7 @@ export async function uploadFile(
       fileType,
       fileName,
       fileSize: fileStats.size,
+      apiFileType: fileType !== 'image' ? (fileType === 'video' ? 'mp4' : fileType === 'audio' ? 'opus' : 'pdf') : undefined,
     };
 
   } catch (error) {
@@ -164,6 +170,7 @@ export async function sendFileMessage(
 ): Promise<void> {
   try {
     // Build message type and content based on file type
+    // IMPORTANT: msg_type MUST match the file_type used in uploadFile()
     let msgType: string;
     let content: string;
 
@@ -176,6 +183,7 @@ export async function sendFileMessage(
         break;
 
       case 'audio':
+        // For audio, msg_type must be 'audio' (matches file_type 'opus')
         msgType = 'audio';
         content = JSON.stringify({
           file_key: uploadResult.fileKey,
@@ -183,13 +191,17 @@ export async function sendFileMessage(
         break;
 
       case 'video':
-        msgType = 'video';
+        // Use 'media' msg_type for video files
+        // Test result: msg_type='video' is invalid, msg_type='file' causes type mismatch
+        // Only msg_type='media' works for video files uploaded with file_type='mp4'
+        msgType = 'media';
         content = JSON.stringify({
           file_key: uploadResult.fileKey,
         });
         break;
 
       default:
+        // For other files, msg_type must be 'file' (matches file_type 'pdf' etc.)
         msgType = 'file';
         content = JSON.stringify({
           file_key: uploadResult.fileKey,
@@ -199,13 +211,15 @@ export async function sendFileMessage(
 
     logger.debug({
       chatId,
+      fileType: uploadResult.fileType,
+      uploadApiType: uploadResult.apiFileType,
       msgType,
       fileKey: uploadResult.fileKey,
       fileName: uploadResult.fileName
     }, 'Sending file message to Feishu');
 
     // Send message
-    await client.im.message.create({
+    const response = await client.im.message.create({
       params: {
         receive_id_type: 'chat_id',
       },
@@ -220,17 +234,76 @@ export async function sendFileMessage(
       chatId,
       fileKey: uploadResult.fileKey,
       fileName: uploadResult.fileName,
-      msgType
+      msgType,
+      messageId: response?.message_id
     }, 'File message sent successfully');
 
   } catch (error) {
+    // Extract detailed error information from Feishu API response
+    let errorCode: number | undefined;
+    let errorMsg: string | undefined;
+    let logId: string | undefined;
+    let troubleshooterUrl: string | undefined;
+
+    // Check if error has Feishu API response details
+    if (error && typeof error === 'object') {
+      const err = error as any;
+
+      // Try to extract from response data
+      if (err.response?.data) {
+        const data = err.response.data;
+        if (Array.isArray(data) && data[0]) {
+          errorCode = data[0].code;
+          errorMsg = data[0].msg;
+          logId = data[0].log_id;
+          troubleshooterUrl = data[0].troubleshooter;
+        }
+      }
+
+      // Fallback to error properties
+      if (!errorCode) {
+        errorCode = err.code;
+      }
+      if (!errorMsg) {
+        errorMsg = err.msg || err.message;
+      }
+    }
+
     logger.error({
       err: error,
       chatId,
       fileKey: uploadResult.fileKey,
-      fileName: uploadResult.fileName
+      fileName: uploadResult.fileName,
+      fileType: uploadResult.fileType,
+      apiFileType: uploadResult.apiFileType,
+      // Detailed Feishu API error info
+      feishuCode: errorCode,
+      feishuMsg: errorMsg,
+      feishuLogId: logId,
+      troubleshooterUrl,
+      // Full error details
+      errorMessage: error instanceof Error ? error.message : String(error),
+      errorStack: error instanceof Error ? error.stack : undefined,
     }, 'Failed to send file message');
-    throw new Error(`Failed to send file message: ${error instanceof Error ? error.message : 'Unknown error'}`);
+
+    // Build detailed error message
+    const details = [
+      `File: ${uploadResult.fileName}`,
+      `Type: ${uploadResult.fileType}`,
+      uploadResult.apiFileType ? `Upload API type: ${uploadResult.apiFileType}` : undefined,
+    ].filter(Boolean).join('\n');
+
+    const feishuError = errorCode ? [
+      `\n**Feishu API Error:**`,
+      `Code: ${errorCode}`,
+      errorMsg ? `Message: ${errorMsg}` : undefined,
+      logId ? `Log ID: ${logId}` : undefined,
+      troubleshooterUrl ? `Troubleshoot: ${troubleshooterUrl}` : undefined,
+    ].filter(Boolean).join('\n') : '';
+
+    throw new Error(
+      `Failed to send file message: ${error instanceof Error ? error.message : 'Unknown error'}\n${details}${feishuError}`
+    );
   }
 }
 

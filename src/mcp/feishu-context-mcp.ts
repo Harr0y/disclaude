@@ -347,14 +347,74 @@ export async function send_file_to_feishu(params: {
     };
 
   } catch (error) {
-    logger.error({ err: error, filePath }, 'Tool: send_file_to_feishu failed');
+    // Extract detailed Feishu API error information
+    let feishuCode: number | undefined;
+    let feishuMsg: string | undefined;
+    let feishuLogId: string | undefined;
+    let troubleshooterUrl: string | undefined;
+
+    // Parse error object for Feishu-specific details
+    if (error && typeof error === 'object') {
+      const err = error as any;
+
+      // Try to extract from response data (Feishu API error format)
+      if (err.response?.data) {
+        const data = err.response.data;
+        if (Array.isArray(data) && data[0]) {
+          feishuCode = data[0].code;
+          feishuMsg = data[0].msg;
+          feishuLogId = data[0].log_id;
+          troubleshooterUrl = data[0].troubleshooter;
+        }
+      }
+
+      // Fallback to error properties
+      if (!feishuCode) {
+        feishuCode = err.code;
+      }
+      if (!feishuMsg) {
+        feishuMsg = err.msg || err.message;
+      }
+    }
+
+    logger.error({
+      err: error,
+      filePath,
+      chatId,
+      // Detailed Feishu API error info
+      feishuCode,
+      feishuMsg,
+      feishuLogId,
+      troubleshooterUrl,
+    }, 'Tool: send_file_to_feishu failed');
 
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+
+    // Build detailed error message for user
+    let errorDetails = `❌ Failed to send file: ${errorMessage}`;
+
+    if (feishuCode) {
+      errorDetails += `\n\n**Feishu API Error Details:**`;
+      errorDetails += `\n- **Code:** ${feishuCode}`;
+      if (feishuMsg) {
+        errorDetails += `\n- **Message:** ${feishuMsg}`;
+      }
+      if (feishuLogId) {
+        errorDetails += `\n- **Log ID:** ${feishuLogId}`;
+      }
+      if (troubleshooterUrl) {
+        errorDetails += `\n- **Troubleshoot:** ${troubleshooterUrl}`;
+      }
+    }
 
     return {
       success: false,
       error: errorMessage,
-      message: `❌ Failed to send file: ${errorMessage}`,
+      message: errorDetails,
+      feishuCode,
+      feishuMsg,
+      feishuLogId,
+      troubleshooterUrl,
     };
   }
 }

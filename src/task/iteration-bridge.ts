@@ -10,12 +10,12 @@
  * - **Evaluator** (Phase 1): Specialized in task completion evaluation
  * - **TaskPlanner** (Phase 2): Breaks down tasks into subtasks
  * - **Worker** (Phase 3 - simple): Executes simple tasks directly
- * - **SubtaskExecutor** (Phase 3 - complex): Executes individual subtasks from plan
+ * - **Executor** (Phase 3 - complex): Executes individual subtasks from plan
  *
  * **Plan-and-Execute Architecture:**
  * - TaskPlanner decomposes complex tasks into subtasks
  * - For simple tasks: Worker executes directly
- * - For complex tasks: SubtaskExecutor runs each subtask with fresh Worker instances
+ * - For complex tasks: Executor runs each subtask with fresh Worker instances
  * - Each subtask executed by fresh agent instance (isolation)
  * - Sequential handoff with context passing
  * - Results aggregated for final output
@@ -32,9 +32,10 @@
 import type { AgentMessage } from '../types/agent.js';
 import { extractText } from '../utils/sdk.js';
 import { Evaluator, type EvaluatorConfig, type EvaluationResult } from './evaluator.js';
+import { Reporter } from './reporter.js';
 import { TaskPlanner } from '../long-task/planner.js';
-import { SubtaskExecutor } from '../long-task/executor.js';
-import type { LongTaskConfig, SubtaskResult, LongTaskPlan } from '../long-task/types.js';
+import { Executor } from '../long-task/executor.js';
+import type { LongTaskConfig, SubtaskResult, LongTaskPlan, SubtaskProgressEvent } from '../long-task/types.js';
 import { createLogger } from '../utils/logger.js';
 import { parseTaskMd } from './prompt-builder.js';
 import { Config } from '../config/index.js';
@@ -134,7 +135,7 @@ export class IterationBridge {
    * - task_done decision happens in Phase 1 (Evaluator)
    * - First iteration: No task_done possible (no Worker output yet)
    * - Evaluator provides missing_items directly to execution phase
-   * - All tasks use TaskPlanner → SubtaskExecutor flow (no simple/direct mode)
+   * - All tasks use TaskPlanner → Executor flow (no simple/direct mode)
    *
    * @returns Async iterable of AgentMessage
    */
@@ -198,10 +199,6 @@ export class IterationBridge {
     // Parse Task.md to extract metadata and user request
     const taskMetadata = parseTaskMd(this.taskMdContent);
 
-    // Determine task path from Task.md (fallback to taskId if not found)
-    // Task.md is typically at workspace/tasks/{taskId}/Task.md
-    const taskPath = `workspace/tasks/${taskMetadata.messageId}/Task.md`;
-
     // Format Evaluator output as execution instruction
     const executionInstruction = this.formatEvaluatorOutputAsInstruction(evaluationResult);
 
@@ -213,7 +210,7 @@ export class IterationBridge {
     }, 'Phase 2: Execution phase with Evaluator feedback (streaming to user)');
 
     // Always use planning mode (Plan-and-Execute architecture)
-    logger.info('Using Plan-and-Execute mode with TaskPlanner and SubtaskExecutor');
+    logger.info('Using Plan-and-Execute mode with TaskPlanner and Executor');
     yield* this.executeWithPlanning(executionInstruction, taskMetadata);
 
     logger.info({
@@ -227,13 +224,13 @@ export class IterationBridge {
    */
   private async *executeWithPlanning(
     instruction: string,
-    taskMetadata: { chatId?: string; messageId: string; userRequest: string }
+    _taskMetadata: { chatId?: string; messageId: string; userRequest: string }
   ): AsyncIterable<AgentMessage> {
     // Phase 1: Create plan
     yield {
       content: '📋 **Planning Phase**\n\nAnalyzing task and creating execution plan...',
       role: 'assistant',
-      messageType: 'progress',
+      messageType: 'status',
     };
 
     const planner = new TaskPlanner(
@@ -256,7 +253,7 @@ export class IterationBridge {
       yield {
         content: `✅ **Plan Created**: ${plan.title}\n\n**Steps**: ${plan.totalSteps}\n\n${plan.subtasks.map((s, i) => `${i + 1}. ${s.title}`).join('\n')}\n\n⏳ Starting execution...`,
         role: 'assistant',
-        messageType: 'progress',
+        messageType: 'status',
       };
     } catch (error) {
       logger.error({ err: error }, 'Planning failed - cannot proceed without execution plan');
@@ -269,47 +266,95 @@ export class IterationBridge {
       throw error;
     }
 
-    // Phase 2: Execute subtasks with SubtaskExecutor
+    // Phase 2: Execute subtasks with Executor
     const subtaskResults: SubtaskResult[] = [];
 
-    for (let i = 0; i < plan.subtasks.length; i++) {
-      const subtask = plan.subtasks[i];
-      const subtaskNumber = i + 1;
+    // Create Reporter for subtask progress formatting
+    const reporter = new Reporter({
+      apiKey: this.executorConfig.apiKey,
+      model: this.executorConfig.model,
+      apiBaseUrl: this.executorConfig.apiBaseUrl,
+      permissionMode: 'bypassPermissions',
+    });
+    await reporter.initialize();
 
-      logger.debug({
-        subtaskNumber,
-        title: subtask.title,
-      }, 'Executing subtask');
+    try {
+      for (let i = 0; i < plan.subtasks.length; i++) {
+        const subtask = plan.subtasks[i];
+        const subtaskNumber = i + 1;
 
-      yield {
-        content: `🔄 **Step ${subtaskNumber}/${plan.totalSteps}**: ${subtask.title}`,
-        role: 'assistant',
-        messageType: 'progress',
-      };
+        logger.debug({
+          subtaskNumber,
+          title: subtask.title,
+        }, 'Executing subtask');
 
-      const executor = new SubtaskExecutor(
-        this.executorConfig.apiKey,
-        this.executorConfig.model,
-        this.executorConfig
-      );
-
-      try {
-        const result = await executor.executeSubtask(
-          subtask,
-          subtaskResults,
-          Config.getWorkspaceDir()
+        const executor = new Executor(
+          this.executorConfig.apiKey,
+          this.executorConfig.model,
+          this.executorConfig
         );
 
-        subtaskResults.push(result);
+        try {
+          // Consume the async generator from Executor
+          // Use manual iteration to capture the return value
+          const generator = executor.executeSubtask(
+            subtask,
+            subtaskResults,
+            Config.getWorkspaceDir()
+          );
 
-        // Store result for Evaluator's evaluation
-        this.workerToManagerQueue.push({
-          content: `Step ${subtaskNumber} completed: ${subtask.title}\n\n${result.summary}`,
-          role: 'assistant',
-          messageType: 'text',
-        });
+          let result: IteratorResult<SubtaskProgressEvent, SubtaskResult>;
+          let finalResult: SubtaskResult | undefined;
 
-        if (!result.success) {
+          // Process each progress event
+          while (!(result = await generator.next()).done) {
+            const event = result.value;
+
+            // For 'output' events, yield directly without Reporter processing
+            // This avoids unnecessary AI calls for every tool output
+            if (event.type === 'output') {
+              yield {
+                content: event.content,
+                role: 'assistant',
+                messageType: event.messageType as any,
+                metadata: event.metadata,
+              };
+              continue;
+            }
+
+            // For other events, pass to Reporter for formatting and delivery
+            const prompt = this.progressEventToPrompt(event, plan.totalSteps);
+            if (prompt) {
+              for await (const msg of reporter.queryStream(prompt)) {
+                yield msg;
+              }
+            }
+          }
+
+          // The return value is in result.value when done is true
+          finalResult = result.value;
+
+          if (finalResult) {
+            subtaskResults.push(finalResult);
+
+            // Store result for Evaluator's evaluation
+            this.workerToManagerQueue.push({
+              content: `Step ${subtaskNumber} completed: ${subtask.title}\n\n${finalResult.summary}`,
+              role: 'assistant',
+              messageType: 'text',
+            });
+
+            if (!finalResult.success) {
+              break;
+            }
+          }
+        } catch (error) {
+          logger.error({
+            err: error,
+            subtaskNumber,
+          }, 'Subtask execution failed');
+
+          // Error is already reported by Executor via error event, but yield a summary
           yield {
             content: `❌ **Step ${subtaskNumber} failed**, stopping execution`,
             role: 'assistant',
@@ -317,25 +362,9 @@ export class IterationBridge {
           };
           break;
         }
-
-        yield {
-          content: `✅ **Step ${subtaskNumber} completed**: ${subtask.title}`,
-          role: 'assistant',
-          messageType: 'progress',
-        };
-      } catch (error) {
-        logger.error({
-          err: error,
-          subtaskNumber,
-        }, 'Subtask execution failed');
-
-        yield {
-          content: `❌ **Step ${subtaskNumber} failed**: ${error instanceof Error ? error.message : String(error)}`,
-          role: 'assistant',
-          messageType: 'error',
-        };
-        break;
       }
+    } finally {
+      reporter.cleanup();
     }
 
     // Phase 3: Aggregate and finalize
@@ -346,10 +375,6 @@ export class IterationBridge {
       content: `🎉 **Multi-Agent Relay Complete**\n\n**Completed**: ${completedSteps}/${plan.totalSteps} steps\n\n**Summary**:\n\n${finalOutput}`,
       role: 'assistant',
       messageType: 'result',
-      metadata: {
-        usedPlanning: true,
-        subtaskCount: plan.totalSteps,
-      },
     };
 
     this.workerDone = true;
@@ -456,6 +481,30 @@ export class IterationBridge {
       }
     }
     return results.join('\n');
+  }
+
+  /**
+   * Convert SubtaskProgressEvent to Reporter prompt.
+   *
+   * @param event - Progress event from Executor
+   * @param totalSteps - Total number of steps in the task
+   * @returns Prompt string for Reporter
+   */
+  private progressEventToPrompt(event: SubtaskProgressEvent, totalSteps: number): string {
+    switch (event.type) {
+      case 'start':
+        return `Report that Step ${event.sequence}/${totalSteps} is starting: ${event.title}\n\n${event.description}`;
+      case 'complete':
+        return `Report that Step ${event.sequence} completed: ${event.title}\n\nCreated ${event.files.length} file(s). Summary: ${event.summaryFile}`;
+      case 'error':
+        return `Report that Step ${event.sequence} failed: ${event.title}\n\nError: ${event.error}`;
+      case 'output':
+        // For raw tool output, we yield directly without Reporter processing
+        // This avoids unnecessary AI calls for every tool output
+        return '';
+      default:
+        return '';
+    }
   }
 
   /**

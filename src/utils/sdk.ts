@@ -60,16 +60,11 @@ export function createAgentSdkOptions(params: CreateAgentSdkOptionsParams): Reco
     permissionMode,
     // Load settings from .claude/ directory (skills, etc.)
     settingSources: ['project'],
-    // Enable Skill tool, WebSearch, Task, and Playwright MCP tools
+    // Enable Skill tool, WebSearch, Task, and core tools
     allowedTools: ALLOWED_TOOLS,
-    // Configure Playwright MCP server
-    mcpServers: {
-      playwright: {
-        type: 'stdio',
-        command: 'npx',
-        args: ['@playwright/mcp@latest'],
-      },
-    },
+    // NOTE: MCP servers are NOT configured here.
+    // Individual agents (like Worker) configure MCP servers via
+    // getSkillMcpServers() in skill-loader.ts.
   };
 
   // Set environment variables

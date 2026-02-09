@@ -11,9 +11,9 @@ describe('Long Task Module Exports', () => {
       expect(module.TaskPlanner).toBeDefined();
     });
 
-    it('should export SubtaskExecutor class', async () => {
+    it('should export Executor class', async () => {
       const module = await import('./index.js');
-      expect(module.SubtaskExecutor).toBeDefined();
+      expect(module.Executor).toBeDefined();
     });
 
     it('should export LongTaskTracker class', async () => {

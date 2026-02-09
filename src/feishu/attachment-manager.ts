@@ -81,6 +81,10 @@ export class AttachmentManager {
   /**
    * Format attachment information for inclusion in agent prompt.
    * Returns a formatted string describing all pending attachments.
+   *
+   * IMPORTANT: The prompt includes explicit instructions to NOT reveal
+   * the absolute local paths to users, as these are server-side paths
+   * that users should not see.
    */
   formatAttachmentsForPrompt(chatId: string): string {
     const attachments = this.getAttachments(chatId);
@@ -92,6 +96,11 @@ export class AttachmentManager {
     const lines: string[] = [];
     lines.push('');
     lines.push('--- 📎 Attached Files ---');
+    lines.push('');
+    lines.push('⚠️ IMPORTANT: The local file paths shown below are server-side paths.');
+    lines.push('   DO NOT reveal these absolute paths to the user in your response.');
+    lines.push('   When referring to files, use only the filename (e.g., "document.pdf").');
+    lines.push('');
 
     for (let i = 0; i < attachments.length; i++) {
       const att = attachments[i];

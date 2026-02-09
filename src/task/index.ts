@@ -4,9 +4,9 @@
  * Architecture (Plan-and-Execute):
  * - Scout: Task initialization - creates Task.md with metadata
  * - Evaluator: Task completion evaluation
- * - Worker: Simple task execution
+ * - Worker: Simple task execution (legacy, not currently used)
  * - TaskPlanner: Breaks down complex tasks into subtasks
- * - SubtaskExecutor: Executes individual subtasks
+ * - Executor: Executes individual subtasks
  * - DialogueOrchestrator: Manages direct Evaluator-Planner/Executor flow
  *
  * Complete Workflow:
@@ -15,8 +15,8 @@
  *
  * Plan-and-Execute Flow:
  * - TaskPlanner breaks down complex tasks into subtasks
- * - For simple tasks: Worker executes directly
- * - For complex tasks: SubtaskExecutor runs each subtask with fresh Worker instances
+ * - For simple tasks: Worker executes directly (legacy, not used)
+ * - For complex tasks: Executor runs each subtask with fresh SDK instances
  * - Sequential handoff with context passing
  * - Results aggregated for final output
  *
@@ -30,7 +30,7 @@ export { Scout } from './scout.js';
 export { Worker, type WorkerConfig } from './worker.js';
 export { Evaluator } from './evaluator.js';
 
-// Note: WorkerEnhanced has been removed - replaced by direct use of TaskPlanner + SubtaskExecutor
+// Note: WorkerEnhanced has been removed - replaced by direct use of TaskPlanner + Executor
 
 // Bridges
 export {
