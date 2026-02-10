@@ -33,7 +33,7 @@ import type { AgentMessage } from '../types/agent.js';
 import { extractText } from '../utils/sdk.js';
 import { Evaluator, type EvaluatorConfig, type EvaluationResult } from '../agents/evaluator.js';
 import { Reporter } from '../agents/reporter.js';
-import { Planner } from '../long-task/Planner.js';
+import { Planner } from '../long-task/planner.js';
 import { Executor } from '../agents/executor.js';
 import type { LongTaskConfig, SubtaskResult, LongTaskPlan, SubtaskProgressEvent } from '../long-task/types.js';
 import { createLogger } from '../utils/logger.js';

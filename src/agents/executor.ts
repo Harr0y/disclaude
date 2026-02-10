@@ -137,10 +137,13 @@ export class Executor {
       let fullResponse = '';
       const createdFiles: string[] = [];
 
-      // Add abort listener
+      // Track abort state
+      let aborted = false;
+
+      // Add abort listener (set flag instead of throwing)
       const abortHandler = () => {
         console.log(`[Executor] Subtask ${subtask.sequence} aborted`);
-        throw new Error('AbortError');
+        aborted = true;
       };
 
       if (this.config.abortSignal) {
@@ -149,6 +152,10 @@ export class Executor {
 
       try {
         for await (const message of queryResult) {
+          // Check for abort (from handler or signal state)
+          if (aborted || this.config.abortSignal?.aborted) {
+            throw new Error('AbortError');
+          }
           // Check for cancellation during iteration
           if (this.config.abortSignal?.aborted) {
             throw new Error('AbortError');
