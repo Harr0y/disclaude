@@ -37,6 +37,11 @@ export class MessageLogger {
 
   private async initialize(): Promise<void> {
     try {
+      // Ensure workspace directory exists first
+      const workspaceDir = Config.getWorkspaceDir();
+      await fs.mkdir(workspaceDir, { recursive: true });
+
+      // Then create chat subdirectory
       await fs.mkdir(this.chatDir, { recursive: true });
 
       // Load all existing message IDs from MD files at startup
