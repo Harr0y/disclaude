@@ -19,11 +19,6 @@ describe('Task Module Exports', () => {
       expect(typeof TaskModule.Scout).toBe('function');
     });
 
-    it('should export Worker', () => {
-      expect(TaskModule.Worker).toBeDefined();
-      expect(typeof TaskModule.Worker).toBe('function');
-    });
-
     it('should export Evaluator', () => {
       expect(TaskModule.Evaluator).toBeDefined();
       expect(typeof TaskModule.Evaluator).toBe('function');
@@ -122,7 +117,6 @@ describe('Task Module Exports', () => {
 
       // Core agents
       expect(exports).toContain('Scout');
-      expect(exports).toContain('Worker');
       expect(exports).toContain('Evaluator');
 
       // Bridges

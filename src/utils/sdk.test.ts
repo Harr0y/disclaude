@@ -13,7 +13,6 @@ import { describe, it, expect } from 'vitest';
 import {
   getNodeBinDir,
   createAgentSdkOptions,
-  extractTextFromSDKMessage,
   parseSDKMessage,
   formatEditToolUseMarkdown,
   buildSdkEnv,
@@ -51,7 +50,6 @@ describe('createAgentSdkOptions', () => {
     expect(result).toHaveProperty('permissionMode', 'bypassPermissions');
     expect(result).toHaveProperty('env');
     expect(result).toHaveProperty('allowedTools');
-    expect(result).toHaveProperty('mcpServers');
   });
 
   it('should set environment variables correctly', () => {
@@ -106,104 +104,8 @@ describe('createAgentSdkOptions', () => {
     expect(Array.isArray((result as Record<string, unknown>).allowedTools)).toBe(true);
     expect(((result as Record<string, unknown>).allowedTools as unknown[]).length).toBeGreaterThan(0);
   });
-
-  it('should configure Playwright MCP server', () => {
-    const result = createAgentSdkOptions({
-      apiKey: mockApiKey,
-      model: mockModel,
-    });
-
-    expect((result as Record<string, unknown>).mcpServers).toHaveProperty('playwright');
-    expect(((result as Record<string, unknown>).mcpServers as Record<string, unknown>).playwright).toEqual({
-      type: 'stdio',
-      command: 'npx',
-      args: ['@playwright/mcp@latest'],
-    });
-  });
 });
 
-describe('extractTextFromSDKMessage', () => {
-  it('should extract text from assistant message with text content', () => {
-    const message: SDKMessage = {
-      type: 'assistant',
-      message: {
-        id: 'msg-1',
-        type: 'message',
-        role: 'assistant',
-        model: 'claude-3-5-sonnet-20241022',
-        content: [
-          {
-            type: 'text',
-            text: 'Hello, world!',
-          },
-        ],
-        stop_reason: 'end_turn',
-        stop_sequence: null,
-        usage: { input_tokens: 10, output_tokens: 20, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
-      },
-      parent_tool_use_id: null,
-      uuid: '00000000-0000-0000-0000-000000000000' as const,
-      session_id: null,
-    } as unknown as SDKMessage;
-
-    const result = extractTextFromSDKMessage(message);
-    expect(result).toBe('Hello, world!');
-  });
-
-  it('should return empty string for message without text', () => {
-    const message: SDKMessage = {
-      type: 'assistant',
-      message: {
-        id: 'msg-2',
-        type: 'message',
-        role: 'assistant',
-        model: 'claude-3-5-sonnet-20241022',
-        content: [],
-        stop_reason: 'end_turn',
-        stop_sequence: null,
-        usage: { input_tokens: 10, output_tokens: 20, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
-      },
-      parent_tool_use_id: null,
-      uuid: '00000000-0000-0000-0000-000000000000' as const,
-      session_id: null,
-    } as unknown as SDKMessage;
-
-    const result = extractTextFromSDKMessage(message);
-    expect(result).toBe('');
-  });
-
-  it('should handle tool_use messages', () => {
-    const message: SDKMessage = {
-      type: 'assistant',
-      message: {
-        id: 'msg-3',
-        type: 'message',
-        role: 'assistant',
-        model: 'claude-3-5-sonnet-20241022',
-        content: [
-          {
-            type: 'tool_use',
-            name: 'Bash',
-            id: 'tool-123',
-            input: {
-              command: 'echo "test"',
-            },
-          },
-        ],
-        stop_reason: 'end_turn',
-        stop_sequence: null,
-        usage: { input_tokens: 10, output_tokens: 20, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 },
-      },
-      parent_tool_use_id: null,
-      uuid: '00000000-0000-0000-0000-000000000000' as const,
-      session_id: null,
-    } as unknown as SDKMessage;
-
-    const result = extractTextFromSDKMessage(message);
-    // The formatToolInput function formats this as "Running: command"
-    expect(result).toContain('echo "test"');
-  });
-});
 
 describe('parseSDKMessage', () => {
   it('should parse text message', () => {

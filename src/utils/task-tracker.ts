@@ -1,11 +1,14 @@
 /**
- * Task tracker for persisting regular/dialogue task records to disk.
+ * Task tracker for managing dialogue task workflow.
  *
  * Directory structure:
  * tasks/
- * └── regular/              # All dialogue tasks (default + Flow 2)
+ * └── regular/              # Dialogue tasks (Scout → dialogue execution)
  *     └── {message_id}/
  *         └── task.md
+ *
+ * NOTE: Task directories are for workflow (Scout → DialogueOrchestrator).
+ * Message deduplication is handled by MessageLogger using message ID parsing from MD files.
  */
 import * as fs from 'fs/promises';
 import * as syncFs from 'fs';
@@ -118,20 +121,10 @@ export class TaskTracker {
   }
 
   /**
-   * Check if a task record exists on disk.
-   */
-  async hasTaskRecord(messageId: string): Promise<boolean> {
-    try {
-      const filePath = this.getTaskFilePath(messageId);
-      await fs.access(filePath);
-      return true;
-    } catch {
-      return false;
-    }
-  }
-
-  /**
    * Save task processing record to disk (asynchronous).
+   * Note: Task directories are now used for workflow (Scout → dialogue), NOT for deduplication.
+   * Deduplication is handled by MessageLogger via MD file parsing.
+   *
    * @param messageId - Unique message identifier
    * @param metadata - Message metadata (chat_id, sender, timestamp, etc.)
    * @param content - Bot response content (what was sent to user)

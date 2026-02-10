@@ -1,33 +1,46 @@
 /**
- * Task planner - breaks down user requests into subtasks.
+ * Planner - breaks down user requests into subtasks.
  *
- * Follows the same skill-based initialization pattern as Scout and Evaluator.
+ * Follows skill-based initialization pattern like Scout and Evaluator.
  */
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import type { LongTaskPlan } from './types.js';
 import { parseSDKMessage, buildSdkEnv } from '../utils/sdk.js';
 import { Config } from '../config/index.js';
 import { createLogger } from '../utils/logger.js';
-import { loadSkill, type ParsedSkill } from '../task/skill-loader.js';
+import { loadSkillOrThrow, type ParsedSkill } from '../task/skill-loader.js';
 
-const logger = createLogger('TaskPlanner');
+const logger = createLogger('Planner');
 
 /**
- * Task planner for decomposing complex tasks.
+ * Planner configuration.
  */
-export class TaskPlanner {
-  private readonly apiKey: string;
-  private readonly model: string;
-  private readonly apiBaseUrl?: string;
+export interface PlannerConfig {
+  apiKey: string;
+  model: string;
+  apiBaseUrl?: string;
+}
+
+/**
+ * Planner for decomposing complex tasks.
+ *
+ * Uses skill files for behavior definition.
+ */
+export class Planner {
+  readonly apiKey: string;
+  readonly model: string;
+  readonly apiBaseUrl: string | undefined;
+  readonly workingDirectory: string;
   private skill?: ParsedSkill;
   private initialized = false;
-  private readonly workingDirectory: string;
+  private logger = createLogger('Planner', { model: '' });
 
-  constructor(apiKey: string, model: string, apiBaseUrl?: string) {
-    this.apiKey = apiKey;
-    this.model = model;
-    this.apiBaseUrl = apiBaseUrl;
+  constructor(config: PlannerConfig) {
+    this.apiKey = config.apiKey;
+    this.model = config.model;
+    this.apiBaseUrl = config.apiBaseUrl;
     this.workingDirectory = Config.getWorkspaceDir();
+    this.logger = createLogger('Planner', { model: this.model });
   }
 
   /**
@@ -38,18 +51,21 @@ export class TaskPlanner {
     if (this.initialized) {
       return;
     }
-
-    // Load skill
-    const skillResult = await loadSkill('planner');
-    if (skillResult.success && skillResult.skill) {
-      this.skill = skillResult.skill;
-      logger.debug({ skillName: 'planner' }, 'Planner skill loaded');
-    } else {
-      logger.warn({ error: skillResult.error }, 'Planner skill not found, using fallback prompt');
-    }
-
+    await this.loadSkill();
     this.initialized = true;
-    logger.debug('TaskPlanner initialized');
+  }
+
+  /**
+   * Load skill file for this agent.
+   * Skill loading is required - throws error if not found.
+   */
+  private async loadSkill(): Promise<void> {
+    this.skill = await loadSkillOrThrow('planner');
+    this.logger.debug({
+      skillName: this.skill.name,
+      toolCount: this.skill.allowedTools.length,
+      contentLength: this.skill.content.length,
+    }, 'Planner skill loaded');
   }
 
   /**
@@ -62,124 +78,14 @@ export class TaskPlanner {
   }
 
   /**
-   * Create task planning prompt.
-   * Uses skill-based prompt if available, otherwise falls back to hardcoded prompt.
+   * Build task planning prompt (static method for consistency with other agents).
+   *
+   * @param userRequest - User's original request
+   * @param skillContent - Required skill content for behavior definition
+   * @returns Formatted planning prompt
    */
-  private createPlanningPrompt(userRequest: string): string {
-    // Use skill-based prompt if skill is loaded
-    if (this.skill && this.skill.content) {
-      return `${this.skill.content}\n\n## User Request\n\n${userRequest}`;
-    }
-
-    // Fallback to hardcoded prompt if skill not loaded
-    return `You are a task planning expert. Your job is to break down complex user requests into a linear sequence of subtasks.
-
-## Your Role
-
-Analyze the user's request and create a detailed execution plan with clear, sequential subtasks. Each subtask must:
-1. Have a well-defined input (from previous step or user context)
-2. Produce specific outputs (at minimum a markdown summary document)
-3. Be independently executable by a fresh agent with context isolation
-4. Have clear success criteria
-
-## Response Format
-
-You MUST respond with a valid JSON object (no markdown, no code blocks, just the JSON):
-
-{
-  "title": "Short descriptive title",
-  "description": "Brief overview of what this task accomplishes",
-  "subtasks": [
-    {
-      "sequence": 1,
-      "title": "Subtask title",
-      "description": "Detailed instructions for this subtask",
-      "inputs": {
-        "description": "What inputs this subtask receives",
-        "sources": ["file paths or data sources from previous steps (can use #section to reference specific markdown sections)"],
-        "context": {}
-      },
-      "outputs": {
-        "description": "What this subtask produces",
-        "files": ["list of expected output files"],
-        "summaryFile": "path/to/summary.md",
-        "markdownRequirements": [
-          {
-            "id": "findings",
-            "title": "Key Findings",
-            "content": "Summary of the main discoveries or results",
-            "required": true
-          },
-          {
-            "id": "recommendations",
-            "title": "Recommendations",
-            "content": "Actionable recommendations based on findings",
-            "required": true
-          }
-        ]
-      },
-      "complexity": "medium"
-    }
-  ]
-}
-
-## Important Guidelines
-
-1. **Linear Flow**: Subtasks must be sequential (each depends only on previous steps)
-2. **Context Isolation**: Each subtask should be executable by a fresh agent with only the provided inputs
-3. **Persistence**: Every subtask MUST produce a markdown summary file with explicit structure requirements
-4. **Clear Inputs/Outputs**: Explicitly state what each subtask consumes and produces
-5. **Markdown Requirements**: CRITICAL - Each subtask's \`markdownRequirements\` must specify:
-   - The exact sections the summary markdown must contain
-   - Each section must have an \`id\` that can be referenced by subsequent steps
-   - Each section must have clear content requirements
-   - Mark sections as \`required: true\` or \`required: false\`
-6. **Inter-Step Dependencies**: Ensure each step's markdown output contains everything the next step needs:
-   - Use \`sources\` in inputs to reference previous summary files: \`"subtask-1/summary.md#findings"\`
-   - The \`#\` notation allows referencing specific markdown sections by their \`id\`
-   - Make markdown requirements detailed enough that next steps have all necessary context
-7. **Reasonable Granularity**: Break down into 3-8 subtasks (not too granular, not too coarse)
-8. **File Paths**: Use relative paths like \`subtask-1/summary.md\`, \`subtask-2/results.json\`
-
-### Markdown Requirements Example
-
-For a research task that feeds into an analysis task:
-
-**Step 1 (Research)** outputs:
-\`\`\`json
-"markdownRequirements": [
-  {
-    "id": "data-gathered",
-    "title": "Data Collected",
-    "content": "List of all data sources and key data points",
-    "required": true
-  },
-  {
-    "id": "initial-insights",
-    "title": "Initial Observations",
-    "content": "Preliminary patterns or anomalies noticed",
-    "required": true
-  }
-]
-\`\`\`
-
-**Step 2 (Analysis)** inputs:
-\`\`\`json
-"inputs": {
-  "sources": [
-    "subtask-1/summary.md#data-gathered",
-    "subtask-1/summary.md#initial-insights"
-  ]
-}
-\`\`\`
-
-This ensures step 2 can reference specific sections from step 1's output.
-
-## User Request
-
-${userRequest}
-
-Now, analyze this request and respond with ONLY the JSON plan (no explanation, no markdown formatting).`;
+  static buildPlanningPrompt(userRequest: string, skillContent: string): string {
+    return `${skillContent}\n\n## User Request\n\n${userRequest}`;
   }
 
   /**
@@ -193,9 +99,9 @@ Now, analyze this request and respond with ONLY the JSON plan (no explanation, n
 
     const taskId = this.generateTaskId();
 
-    // Create SDK options using unified helper (like Scout/Evaluator)
-    // TaskPlanner only needs Read/Glob/Grep tools for planning, not browser automation
-    const allowedTools = this.skill?.allowedTools || ['Read', 'Glob', 'Grep', 'Write', 'Bash'];
+    // Create SDK options using unified helper
+    // Skill is required, so allowedTools is always defined
+    const allowedTools = this.skill!.allowedTools;
 
     const sdkOptions: Record<string, unknown> = {
       cwd: this.workingDirectory,
@@ -218,7 +124,6 @@ Now, analyze this request and respond with ONLY the JSON plan (no explanation, n
       logger.debug({
         taskId,
         userRequest,
-        hasSkill: !!this.skill,
         model: agentOptions?.model || this.model,
         sdkOptionsKeys: Object.keys(sdkOptions),
         allowedTools: (sdkOptions as { allowedTools?: string[] }).allowedTools,
@@ -226,9 +131,9 @@ Now, analyze this request and respond with ONLY the JSON plan (no explanation, n
         cwd: (sdkOptions as { cwd?: string }).cwd,
       }, 'Calling SDK query() for task planning');
 
-      // Query planning agent
+      // Query planning agent with skill content
       const queryResult = query({
-        prompt: this.createPlanningPrompt(userRequest),
+        prompt: Planner.buildPlanningPrompt(userRequest, this.skill!.content),
         options: sdkOptions,
       });
 

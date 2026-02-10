@@ -188,6 +188,7 @@ describe('Feishu File Uploader', () => {
         fileType: 'file',
         fileName: 'document.pdf',
         fileSize: 1024,
+        apiFileType: 'pdf',
       });
 
       expect(mockClient.im.file.create).toHaveBeenCalled();

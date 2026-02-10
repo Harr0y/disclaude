@@ -12,6 +12,19 @@ import type { Subtask, SubtaskResult, LongTaskConfig } from './types.js';
 import type { ParsedSDKMessage } from '../types/agent.js';
 
 /**
+ * Executor configuration.
+ *
+ * Extends LongTaskConfig with API credentials for consistency with other agents.
+ */
+export interface ExecutorConfig {
+  apiKey: string;
+  model: string;
+  apiBaseUrl?: string;
+  abortSignal?: AbortSignal;
+  totalSteps?: number;
+}
+
+/**
  * Progress event type for subtask execution.
  * These events are yielded during execution and passed to the Reporter by the IterationBridge.
  */
@@ -90,8 +103,8 @@ export class Executor {
     // Prepare context from previous results
     const contextInfo = this.buildContextInfo(previousResults);
 
-    // Create execution prompt
-    const prompt = this.createExecutionPrompt(subtask, contextInfo, subtaskDir);
+    // Create execution prompt using static method
+    const prompt = Executor.buildExecutionPrompt(subtask, contextInfo, subtaskDir);
 
     // Create SDK options for isolated agent using shared utility
     const sdkOptions = createAgentSdkOptions({
@@ -281,10 +294,15 @@ export class Executor {
   }
 
   /**
-   * Create execution prompt for a subtask.
+   * Build execution prompt for a subtask (static method for consistency with other agents).
+   *
+   * @param subtask - Subtask to execute
+   * @param contextInfo - Context from previous steps
+   * @param workspaceDir - Working directory for this subtask
+   * @returns Formatted execution prompt
    */
-  private createExecutionPrompt(subtask: Subtask, contextInfo: string, workspaceDir: string): string {
-    const markdownRequirements = this.formatMarkdownRequirements(subtask);
+  static buildExecutionPrompt(subtask: Subtask, contextInfo: string, workspaceDir: string): string {
+    const markdownRequirements = Executor.formatMarkdownRequirements(subtask);
 
     return `You are executing a subtask in a long task workflow. You have a specific responsibility within the larger plan.
 
@@ -337,9 +355,9 @@ Begin your work now. Focus only on your assigned subtask.`;
   }
 
   /**
-   * Format markdown requirements for the execution prompt.
+   * Format markdown requirements for the execution prompt (static helper).
    */
-  private formatMarkdownRequirements(subtask: Subtask): string {
+  private static formatMarkdownRequirements(subtask: Subtask): string {
     if (!subtask.outputs.markdownRequirements || subtask.outputs.markdownRequirements.length === 0) {
       return `
 

@@ -11,51 +11,15 @@ import { DEDUPLICATION } from '../config/constants.js';
 import { FeishuOutputAdapter } from '../utils/output-adapter.js';
 import { TaskTracker } from '../utils/task-tracker.js';
 import { LongTaskTracker, type TaskPlanData, type DialogueTaskPlan } from '../long-task/index.js';
-import { buildTextContent } from './content-builder.js';
 import { createLogger } from '../utils/logger.js';
-import { handleError, ErrorCategory } from '../utils/error-handler.js';
-import * as CommandHandlers from './command-handlers.js';
-import type { CommandHandlerContext } from './command-handlers.js';
 import { attachmentManager, type FileAttachment } from './attachment-manager.js';
 import { downloadFile } from './file-downloader.js';
 import { messageHistoryManager } from './message-history.js';
+import { messageLogger } from './message-logger.js';
 import { Pilot } from '../pilot/index.js';
-
-// Temporarily disabled: Markdown detection for rich text messages
-// TODO: Re-enable when rich text format is needed again
-// function containsMarkdown(text: string): boolean {
-//   // Common Markdown patterns in Lark:
-//   // Headers: # ## ###
-//   // Bold: **text**
-//   // Italic: *text* or _text_
-//   // Strikethrough: ~~text~~
-//   // Inline code: `code`
-//   // Code blocks: ```
-//   // Links: [text](url)
-//   // Images: ![alt](url)
-//   // Lists: - item, * item, 1. item
-//   // Quotes: > quote
-//   // Horizontal rules: --- or ***
-//   // Mentions: <at id=...>
-//   const markdownPatterns = [
-//     /^#{1,6}\s/m,           // Headers
-//     /\*\*[^*]+\*\*/,        // Bold
-//     /\*[^*]+\*/,            // Italic (single asterisk)
-//     /_[^_]+_/m,             // Italic (underscore) - word boundaries to avoid false positives
-//     /~~[^~]+~~/,            // Strikethrough
-//     /`[^`]+`/,              // Inline code
-//     /```/,                  // Code blocks
-//     /\[[^\]]+\]\([^)]+\)/,  // Links
-//     /!\[[^\]]+\]\([^)]+\)/, // Images
-//     /^\s*[-*]\s/m,          // Unordered lists
-//     /^\s*\d+\.\s/m,         // Ordered lists
-//     /^>\s/m,                // Quotes
-//     /^---|^\*{3}/m,         // Horizontal rules
-//     /<at[^>]*>/,            // Mentions
-//   ];
-//
-//   return markdownPatterns.some(pattern => pattern.test(text));
-// }
+import { FileHandler } from './file-handler.js';
+import { MessageSender } from './message-sender.js';
+import { TaskFlowOrchestrator } from './task-flow-orchestrator.js';
 
 /**
  * Feishu/Lark bot using WebSocket.
@@ -71,8 +35,7 @@ export class FeishuBot extends EventEmitter {
   private logger = createLogger('FeishuBot');
 
   // Track processed message IDs to prevent duplicate processing
-  private processedMessageIds = new Set<string>();
-  private readonly MAX_PROCESSED_IDS = DEDUPLICATION.MAX_PROCESSED_IDS;
+  // Note: processedMessageIds moved to MessageLogger for deduplication via MD files
   private readonly MAX_MESSAGE_AGE = DEDUPLICATION.MAX_MESSAGE_AGE;
 
   // Task tracker for persistent deduplication
@@ -83,6 +46,15 @@ export class FeishuBot extends EventEmitter {
 
   // Active dialogue bridges per chat
   private activeDialogues = new Map<string, DialogueOrchestrator>();
+
+  // File handler for file/image message processing
+  private fileHandler: FileHandler;
+
+  // Message sender for sending messages
+  private messageSender?: MessageSender;
+
+  // Task flow orchestrator for Scout → Dialogue flow
+  private taskFlowOrchestrator: TaskFlowOrchestrator;
 
   // Pilot instance for direct chat mode
   private pilot: Pilot;
@@ -96,6 +68,25 @@ export class FeishuBot extends EventEmitter {
     this.appSecret = appSecret;
     this.taskTracker = new TaskTracker();
     this.longTaskTracker = new LongTaskTracker();
+
+    // Initialize FileHandler
+    this.fileHandler = new FileHandler(
+      attachmentManager,
+      downloadFile,
+      this.logger
+    );
+
+    // Initialize TaskFlowOrchestrator
+    this.taskFlowOrchestrator = new TaskFlowOrchestrator(
+      this.taskTracker,
+      this.longTaskTracker,
+      {
+        sendMessage: this.sendMessage.bind(this),
+        sendCard: this.sendCard.bind(this),
+        sendFile: this.sendFileToUser.bind(this),
+      },
+      this.logger
+    );
 
     // Initialize Pilot with Feishu-specific callbacks
     this.pilot = new Pilot({
@@ -116,6 +107,11 @@ export class FeishuBot extends EventEmitter {
         appId: this.appId,
         appSecret: this.appSecret,
       });
+      // Initialize MessageSender when client is created
+      this.messageSender = new MessageSender({
+        client: this.client,
+        logger: this.logger,
+      });
     }
     return this.client;
   }
@@ -125,43 +121,10 @@ export class FeishuBot extends EventEmitter {
    * Currently using plain text format only (rich text temporarily disabled).
    */
   async sendMessage(chatId: string, text: string): Promise<void> {
-    const client = this.getClient();
-
-    try {
-      // Always use plain text format
-      // Use content builder utility for consistent message formatting
-      const response = await client.im.message.create({
-        params: {
-          receive_id_type: 'chat_id',
-        },
-        data: {
-          receive_id: chatId,
-          msg_type: 'text',
-          content: buildTextContent(text),
-        },
-      });
-
-      // Track outgoing bot message in history
-      // Feishu API returns message_id in response.data.message_id
-      const botMessageId = response?.data?.message_id;
-      if (botMessageId) {
-        messageHistoryManager.addBotMessage(chatId, botMessageId, text);
-      }
-
-      // Defensive: Ensure text is valid before substring
-      const safeText = text || '';
-      const preview = safeText.length > 100 ? `${safeText.substring(0, 100)  }...` : safeText;
-      this.logger.debug({ chatId, messageType: 'text', preview, botMessageId }, 'Message sent');
-    } catch (error) {
-      handleError(error, {
-        category: ErrorCategory.API,
-        chatId,
-        messageType: 'text'
-      }, {
-        log: true,
-        customLogger: this.logger
-      });
+    if (!this.messageSender) {
+      this.getClient(); // Initialize messageSender
     }
+    await this.messageSender!.sendText(chatId, text);
   }
 
   /**
@@ -177,33 +140,10 @@ export class FeishuBot extends EventEmitter {
     card: Record<string, unknown>,
     description?: string
   ): Promise<void> {
-    const client = this.getClient();
-
-    try {
-      await client.im.message.create({
-        params: {
-          receive_id_type: 'chat_id',
-        },
-        data: {
-          receive_id: chatId,
-          msg_type: 'interactive',
-          content: JSON.stringify(card),
-        },
-      });
-
-      const desc = description ? ` (${description})` : '';
-      this.logger.debug({ chatId, description: desc }, 'Card sent');
-    } catch (error) {
-      handleError(error, {
-        category: ErrorCategory.API,
-        chatId,
-        description,
-        messageType: 'card'
-      }, {
-        log: true,
-        customLogger: this.logger
-      });
+    if (!this.messageSender) {
+      this.getClient(); // Initialize messageSender
     }
+    await this.messageSender!.sendCard(chatId, card, description);
   }
 
   /**
@@ -214,37 +154,17 @@ export class FeishuBot extends EventEmitter {
    * @param filePath - Local file path to send
    */
   async sendFileToUser(chatId: string, filePath: string): Promise<void> {
-    try {
-      const { uploadAndSendFile } = await import('./file-uploader.js');
-      const fileSize = await uploadAndSendFile(this.getClient(), filePath, chatId);
-      this.logger.info({ chatId, filePath, fileSize }, 'File sent to user');
-    } catch (error) {
-      this.logger.error({ err: error, filePath, chatId }, 'Failed to send file to user');
-      // Don't throw - file sending failure shouldn't break the main flow
+    if (!this.messageSender) {
+      this.getClient(); // Initialize messageSender
     }
+    await this.messageSender!.sendFile(chatId, filePath);
   }
 
 
   /**
    * Handle the complete task flow: Flow 1 (create Task.md) → Flow 2 (execute dialogue)
    *
-   * DESIGN NOTE: Why create new Agent instances for each message?
-   *
-   * Each user message creates fresh agent instances because:
-   * 1. **Isolation**: No cross-contamination between different user requests
-   * 2. **Simplicity**: No complex state synchronization needed
-   * 3. **Resource Management**: Agents are short-lived, easier to cleanup
-   * 4. **Session Management**: SDK handles session persistence via resume parameter
-   *
-   * The agents themselves are stateless - conversation context is maintained by:
-   * - Agent SDK's native session management (via resume parameter)
-   * - Task.md file on disk (for task records)
-   *
-   * This is INTENTIONAL - do not "optimize" by reusing agent instances.
-   *
-   * NEW FLOW:
-   * Flow 1: Scout creates Task.md file
-   * Flow 2: Execute dialogue loop with Worker ↔ Manager
+   * Delegates to TaskFlowOrchestrator for Scout → Dialogue execution.
    *
    * @param chatId - Feishu chat ID
    * @param text - User's message text
@@ -258,202 +178,15 @@ export class FeishuBot extends EventEmitter {
     messageId: string,
     sender?: { sender_type?: string; sender_id?: string }
   ): Promise<string> {
-    const agentConfig = Config.getAgentConfig();
+    const conversationHistory = messageHistoryManager.getFormattedHistory(chatId, 20);
 
-    // === FLOW 1: Scout creates Task.md ===
-    const taskPath = this.taskTracker.getDialogueTaskPath(messageId);
-
-    const scout = new Scout({
-      apiKey: agentConfig.apiKey,
-      model: agentConfig.model,
-      apiBaseUrl: agentConfig.apiBaseUrl,
-    });
-    await scout.initialize();
-
-    // Set context for Task.md creation
-    // Include conversation history from message history manager
-    const conversationHistory = messageHistoryManager.getFormattedHistory(chatId, 20); // Last 20 messages
-
-    scout.setTaskContext({
+    return this.taskFlowOrchestrator.execute({
       chatId,
-      userId: sender?.sender_id,
       messageId,
-      taskPath,
+      text,
+      sender,
       conversationHistory,
     });
-
-    // Create output adapter for Scout phase
-    const scoutAdapter = new FeishuOutputAdapter({
-      sendMessage: async (id: string, msg: string) => {
-        await this.sendMessage(id, msg);
-      },
-      sendCard: async (id: string, card: Record<string, unknown>) => {
-        await this.sendCard(id, card);
-      },
-      chatId,
-      sendFile: this.sendFileToUser.bind(this, chatId),
-    });
-    scoutAdapter.clearThrottleState();
-    scoutAdapter.resetMessageTracking();
-
-    // Run Scout to create Task.md
-    this.logger.info({ messageId, taskPath }, 'Flow 1: Scout creating Task.md');
-    for await (const msg of scout.queryStream(text)) {
-      this.logger.debug({ content: msg.content }, 'Scout output');
-
-      // Send text content to user
-      if (msg.content && typeof msg.content === 'string') {
-        await scoutAdapter.write(msg.content, msg.messageType ?? 'text', {
-          toolName: msg.metadata?.toolName as string | undefined,
-          toolInputRaw: msg.metadata?.toolInputRaw as Record<string, unknown> | undefined,
-        });
-      }
-    }
-    this.logger.info({ taskPath }, 'Task.md created by Scout');
-
-    // === Send task.md content to user ===
-    try {
-      const taskContent = await fs.readFile(taskPath, 'utf-8');
-      await this.sendMessage(chatId, taskContent);
-    } catch (error) {
-      this.logger.error({ err: error, taskPath }, 'Failed to read/send task.md');
-    }
-
-    // === FLOW 2: Execute dialogue ===
-    // The bridge will create fresh Evaluator/Planner/Executor instances per iteration (P0 Architecture)
-    // Import MCP tools to set message tracking callback
-    const { setMessageSentCallback } = await import('../mcp/feishu-context-mcp.js');
-
-    // Create bridge with agent configs (not instances)
-    const bridge = new DialogueOrchestrator({
-      plannerConfig: {
-        apiKey: agentConfig.apiKey,
-        model: agentConfig.model,
-        apiBaseUrl: agentConfig.apiBaseUrl,
-      },
-      executorConfig: {
-        apiKey: agentConfig.apiKey,
-        model: agentConfig.model,
-        apiBaseUrl: agentConfig.apiBaseUrl,
-        sendMessage: this.sendMessage.bind(this),
-        sendCard: this.sendCard.bind(this),
-        chatId,
-        workspaceBaseDir: Config.getWorkspaceDir(),
-      },
-      evaluatorConfig: {
-        apiKey: agentConfig.apiKey,
-        model: agentConfig.model,
-        apiBaseUrl: agentConfig.apiBaseUrl,
-        permissionMode: 'bypassPermissions',
-      },
-      onTaskPlanGenerated: async (plan: TaskPlanData) => {
-        await this.longTaskTracker.saveDialogueTaskPlan(plan as DialogueTaskPlan);
-      },
-    });
-
-    // Set the message sent callback to track when MCP tools send messages
-    // This ensures hasAnyMessage() returns true when agents use send_user_feedback
-    const messageTracker = bridge.getMessageTracker();
-    setMessageSentCallback((_chatId: string) => {
-      messageTracker.recordMessageSent();
-    });
-
-    // Store for potential cancellation
-    this.activeDialogues.set(chatId, bridge);
-
-    // Create output adapter for this chat
-    // Wrap sendMessage to track when user messages are sent
-    const adapter = new FeishuOutputAdapter({
-      sendMessage: async (id: string, msg: string) => {
-        messageTracker.recordMessageSent();  // Track message sending
-        await this.sendMessage(id, msg);
-      },
-      sendCard: async (id: string, card: Record<string, unknown>) => {
-        messageTracker.recordMessageSent();  // Track card sending
-        await this.sendCard(id, card);
-      },
-      chatId,
-      sendFile: this.sendFileToUser.bind(this, chatId),
-    });
-    adapter.clearThrottleState();
-    adapter.resetMessageTracking();  // Reset tracking for new task
-
-    // Accumulate response content
-    const responseChunks: string[] = [];
-
-    // Track completion reason for warning message
-    let completionReason = 'unknown';
-
-    try {
-      this.logger.debug({ chatId, taskId: path.basename(taskPath, '.md') }, 'Flow 2: Starting dialogue');
-
-      // Run dialogue loop (Flow 2)
-      for await (const message of bridge.runDialogue(
-        taskPath,
-        text,
-        chatId,
-        messageId  // Each messageId has its own session
-      )) {
-        const content = typeof message.content === 'string'
-          ? message.content
-          : extractText(message);
-
-        if (!content) {
-          continue;
-        }
-
-        responseChunks.push(content);
-
-        // Send to user
-        await adapter.write(content, message.messageType ?? 'text', {
-          toolName: message.metadata?.toolName as string | undefined,
-          toolInputRaw: message.metadata?.toolInputRaw as Record<string, unknown> | undefined,
-        });
-
-        // Update completion reason based on message type
-        if (message.messageType === 'result') {
-          completionReason = 'task_done';
-        } else if (message.messageType === 'error') {
-          completionReason = 'error';
-        }
-      }
-
-      const finalResponse = responseChunks.join('\n');
-
-      return finalResponse;
-    } catch (error) {
-      this.logger.error({ err: error, chatId }, 'Task flow failed');
-      completionReason = 'error';
-
-      const enriched = handleError(error, {
-        category: ErrorCategory.SDK,
-        chatId,
-        userMessage: 'Task processing failed. Please try again.'
-      }, {
-        log: true,
-        customLogger: this.logger
-      });
-
-      const errorMsg = `❌ ${enriched.userMessage || enriched.message}`;
-      await this.sendMessage(chatId, errorMsg);
-
-      return errorMsg;
-    } finally {
-      // Clean up message tracking callback to prevent memory leaks
-      const { setMessageSentCallback } = await import('../mcp/feishu-context-mcp.js');
-      setMessageSentCallback(null);
-
-      // Check if no user message was sent and send warning
-      if (!messageTracker.hasAnyMessage()) {
-        const taskId = path.basename(taskPath, '.md');
-        const warning = messageTracker.buildWarning(completionReason, taskId);
-        this.logger.info({ chatId, completionReason }, 'Sending no-message warning to user');
-        await this.sendMessage(chatId, warning);
-      }
-
-      // Clean up bridge reference
-      this.activeDialogues.delete(chatId);
-    }
   }
 
   /**
@@ -504,155 +237,8 @@ ${text}`;
   }
 
   /**
-   * Build a structured prompt for file upload notification.
-   *
-   * This creates a special prompt format that includes file metadata
-   * in a structured way, making it easier for the Pilot agent to understand
-   * and process uploaded files.
-   *
-   * @param attachment - File attachment metadata
-   * @returns Structured prompt string
-   */
-  private buildFileUploadPrompt(attachment: FileAttachment): string {
-    const lines: string[] = [];
-
-    // Header with special marker for file uploads
-    lines.push('🔔 SYSTEM: User uploaded a file');
-    lines.push('');
-
-    // Structured metadata block
-    lines.push('```file_metadata');
-    lines.push(`file_name: ${attachment.fileName || 'unknown'}`);
-    lines.push(`file_type: ${attachment.fileType}`);
-    lines.push(`file_key: ${attachment.fileKey}`);
-
-    if (attachment.localPath) {
-      lines.push(`local_path: ${attachment.localPath}`);
-    }
-
-    if (attachment.fileSize) {
-      const sizeMB = (attachment.fileSize / 1024 / 1024).toFixed(2);
-      lines.push(`file_size_mb: ${sizeMB}`);
-    }
-
-    if (attachment.mimeType) {
-      lines.push(`mime_type: ${attachment.mimeType}`);
-    }
-
-    lines.push('```');
-    lines.push('');
-
-    // Context for the agent
-    lines.push('The user has uploaded a file. It is now available at the local path above.');
-    lines.push('');
-    lines.push('Please wait for the user\'s instructions on how to process this file.');
-
-    return lines.join('\n');
-  }
-
-  /**
    * Handle /long command - start long task workflow.
    */
-  /**
-   * Handle image/file message - download and store for later processing.
-   */
-  private async handleFileMessage(
-    chatId: string,
-    messageType: string,
-    content: any,
-    messageId: string,
-    _sender?: any
-  ): Promise<void> {
-    try {
-      this.logger.info({ chatId, messageType, messageId }, 'File/image message received');
-
-      // Extract file_key from content based on message type
-      let fileKey: string | undefined;
-      let fileName: string | undefined;
-
-      if (messageType === 'image') {
-        // Image message content: {"image_key":"..."}
-        const parsed = JSON.parse(content);
-        fileKey = parsed.image_key;
-        // Provide default filename with extension for better file handling
-        fileName = `image_${fileKey?.substring(0, 8)}.jpg`;
-      } else if (messageType === 'file') {
-        // File message content: {"file_key":"...","file_name":"..."}
-        const parsed = JSON.parse(content);
-        fileKey = parsed.file_key;
-        fileName = parsed.file_name;
-      } else if (messageType === 'media') {
-        // Audio/video message
-        const parsed = JSON.parse(content);
-        fileKey = parsed.file_key || parsed.media_key;
-        fileName = parsed.file_name || `media_${fileKey?.substring(0, 8)}.mp4`;
-      }
-
-      if (!fileKey) {
-        this.logger.warn({ messageType, content }, 'No file_key found in message');
-        await this.sendMessage(chatId, '⚠️ Unable to process this file (missing file_key)');
-        return;
-      }
-
-      // Create attachment metadata
-      const attachment: FileAttachment = {
-        fileKey,
-        fileType: messageType,
-        fileName,
-        timestamp: Date.now(),
-        messageId, // Store messageId for downloading user uploads
-      };
-
-      // Download file immediately
-      const client = this.getClient();
-      try {
-        const localPath = await downloadFile(client, fileKey, messageType, fileName, messageId);
-        attachment.localPath = localPath;
-
-        // Get file stats
-        const stats = await import('./file-downloader.js').then(m => m.getFileStats(localPath));
-        if (stats) {
-          attachment.fileSize = stats.size;
-        }
-
-        // Store attachment
-        attachmentManager.addAttachment(chatId, attachment);
-
-        // Send confirmation to user
-        const sizeText = attachment.fileSize
-          ? `(${(attachment.fileSize / 1024 / 1024).toFixed(2)} MB)`
-          : '';
-
-        await this.sendMessage(
-          chatId,
-          `✅ File received: ${attachment.fileName || messageType} ${sizeText}`
-        );
-
-        this.logger.info({ chatId, fileKey, localPath }, 'File downloaded and stored');
-
-        // Send a structured prompt to the agent about the newly uploaded file
-        // This informs the agent immediately that a file is available, even before the user sends a text message
-        // The prompt uses a structured format with metadata for better file handling
-        const filePrompt = this.buildFileUploadPrompt(attachment);
-
-        // Queue the file notification message to the Pilot
-        await this.pilot.enqueueMessage(chatId, filePrompt, `file-${messageId}`);
-
-        this.logger.info({ chatId, fileName: attachment.fileName }, 'File notification sent to agent');
-
-      } catch (downloadError) {
-        this.logger.error({ err: downloadError, fileKey }, 'Failed to download file');
-        await this.sendMessage(
-          chatId,
-          '⚠️ Failed to download file. Please try again or contact support.'
-        );
-        return;
-      }
-
-    } catch (error) {
-      this.logger.error({ err: error, chatId, messageType }, 'Failed to handle file message');
-    }
-  }
 
   /**
    * Handle incoming message event from WebSocket.
@@ -692,33 +278,11 @@ ${text}`;
     // Deduplication: skip already processed messages
     if (message_id) {
       this.logger.debug({ messageId: message_id }, 'Checking deduplication');
-      // First check: in-memory cache
-      if (this.processedMessageIds.has(message_id)) {
-        this.logger.debug({ messageId: message_id }, 'Skipped duplicate message (in-memory)');
+
+      // Use MessageLogger (all message IDs loaded at startup)
+      if (messageLogger.isMessageProcessed(message_id)) {
+        this.logger.debug({ messageId: message_id }, 'Skipped duplicate message');
         return;
-      }
-
-      // Second check: file-based deduplication
-      this.logger.debug('Checking file-based deduplication');
-      const hasRecord = await this.taskTracker.hasTaskRecord(message_id);
-      this.logger.debug({ hasRecord }, 'File-based deduplication result');
-      if (hasRecord) {
-        this.logger.debug({ messageId: message_id }, 'Skipped duplicate message (file-based)');
-        // Add to memory cache to avoid repeated file checks
-        this.processedMessageIds.add(message_id);
-        return;
-      }
-
-      // Add to memory cache
-      this.logger.debug('Adding to memory cache');
-      this.processedMessageIds.add(message_id);
-
-      // Prevent memory leak - remove old entries when limit is reached
-      if (this.processedMessageIds.size > this.MAX_PROCESSED_IDS) {
-        const first = this.processedMessageIds.values().next().value;
-        if (first) {
-          this.processedMessageIds.delete(first);
-        }
       }
     }
 
@@ -748,7 +312,7 @@ ${text}`;
     this.logger.debug({ messageType: message_type }, 'Checking message type');
     // Handle file/image messages - download and store for later processing
     if (message_type === 'image' || message_type === 'file' || message_type === 'media') {
-      await this.handleFileMessage(chat_id, message_type, content, message_id, sender);
+      await this.fileHandler.handleFileMessage(chat_id, message_type, content, message_id, sender);
       return;
     }
 
@@ -802,69 +366,36 @@ ${text}`;
 
     this.logger.info({ messageId: message_id, chatId: chat_id, messageType: message_type, textLength: text.length }, 'Message received');
 
-    // Track incoming user message in history
-    messageHistoryManager.addUserMessage(chat_id, message_id, text, sender?.sender_id);
+    // Log to persistent MD file (replaces in-memory history)
+    await messageLogger.logIncomingMessage(
+      message_id,
+      sender?.sender_id || 'unknown',
+      chat_id,
+      text,
+      message_type,
+      create_time
+    );
 
-    // Save task record BEFORE processing to prevent loss on restart
-    // For restart commands, use sync write to ensure record is persisted before process exits
-    if (message_id) {
-      const metadata = {
-        chatId: chat_id,
-        senderType: sender?.sender_type,
-        senderId: sender?.sender_id,
-        text,
-        timestamp: create_time || new Date().toISOString(),
-      };
+    // Check for /task command (all other commands go to Pilot)
+    if (text.trim().startsWith('/task ')) {
+      const taskText = text.trim().substring(6).trim();
 
-      // Check if this is a restart command
-      const isRestartCommand = text.toLowerCase().includes('restart') &&
-                               text.toLowerCase().includes('pm2');
-
-      if (isRestartCommand) {
-        // Use synchronous write for restart commands to ensure record persists before process exits
-        this.logger.debug('Restart command detected, using sync write for task record');
-        this.taskTracker.saveTaskRecordSync(
-          message_id,
-          metadata,
-          '[Processing...]'
+      // Show usage if no task text provided
+      if (!taskText) {
+        await this.sendMessage(
+          chat_id,
+          '⚠️ Usage: `/task <your task description>`\n\nExample: `/task Analyze the authentication system`'
         );
-      } else {
-        // For normal messages, async write is fine
-        await this.taskTracker.saveTaskRecord(
-          message_id,
-          metadata,
-          '[Processing...]'
-        );
-      }
-    }
-
-    // Check for commands
-    if (CommandHandlers.isCommand(text)) {
-      const commandContext: CommandHandlerContext = {
-        chatId: chat_id,
-        sendMessage: this.sendMessage.bind(this),
-      };
-
-      // Handle special case for /task command (needs additional logic)
-      if (text.trim().startsWith('/task ')) {
-        const taskText = text.trim().substring(6).trim();
-        await CommandHandlers.handleTaskCommand(commandContext, taskText);
-
-        if (taskText) {
-          // Use task flow (Scout → Task.md → DialogueOrchestrator with auto-detection)
-          await this.handleTaskFlow(chat_id, taskText, message_id, sender);
-        }
         return;
       }
 
-      // Handle all other commands
-      const handled = await CommandHandlers.executeCommand(commandContext, text);
-      if (handled) {
-        return;
-      }
+      // Use task flow (Scout → Task.md → DialogueOrchestrator)
+      await this.handleTaskFlow(chat_id, taskText, message_id, sender);
+      return;
     }
 
     // DEFAULT: Direct chat mode (no Task.md, no Scout, just SDK query)
+    // All other messages (including any other "commands") go to Pilot
     await this.handleDirectChat(chat_id, text, message_id);
   }
 

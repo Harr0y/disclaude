@@ -36,7 +36,7 @@ import { Config } from '../config/index.js';
 import type { AgentMessage, AgentInput } from '../types/agent.js';
 import { feishuSdkMcpServer } from '../mcp/feishu-context-mcp.js';
 import { createLogger } from '../utils/logger.js';
-import { loadSkill, type ParsedSkill } from './skill-loader.js';
+import { loadSkillOrThrow, type ParsedSkill } from '../task/skill-loader.js';
 import type { EvaluationResult } from './evaluator.js';
 
 /**
@@ -87,12 +87,12 @@ export class Reporter {
       return;
     }
 
-    // Load skill
-    const skillResult = await loadSkill('reporter');
-    if (skillResult.success && skillResult.skill) {
-      this.skill = skillResult.skill;
-      this.logger.debug({ skillName: 'reporter' }, 'Reporter skill loaded');
-    }
+    // Load skill (required)
+    this.skill = await loadSkillOrThrow('reporter');
+    this.logger.debug({
+      skillName: this.skill.name,
+      toolCount: this.skill.allowedTools.length,
+    }, 'Reporter skill loaded');
 
     this.initialized = true;
     this.logger.debug('Reporter initialized');
@@ -110,7 +110,8 @@ export class Reporter {
     }
 
     // Create SDK options for Reporter
-    const allowedTools = this.skill?.allowedTools || ['send_user_feedback', 'send_file_to_feishu'];
+    // Skill is required, so allowedTools is always defined
+    const allowedTools = this.skill!.allowedTools;
     // Note: task_done is intentionally NOT included (Evaluator's job)
 
     const sdkOptions: Record<string, unknown> = {

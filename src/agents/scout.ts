@@ -19,8 +19,8 @@ import { parseSDKMessage, buildSdkEnv } from '../utils/sdk.js';
 import { Config } from '../config/index.js';
 import type { AgentMessage } from '../types/agent.js';
 import { createLogger } from '../utils/logger.js';
-import { loadSkill, type ParsedSkill } from './skill-loader.js';
-import { buildScoutPrompt, type TaskContext } from './prompt-builder.js';
+import { loadSkillOrThrow, type ParsedSkill } from '../task/skill-loader.js';
+import { buildScoutPrompt, type TaskContext } from '../task/prompt-builder.js';
 
 // Re-export extractText for convenience
 export { extractText } from '../utils/sdk.js';
@@ -82,19 +82,11 @@ export class Scout {
    * Skill loading is required - throws error if it fails.
    */
   private async loadSkill(): Promise<void> {
-    const result = await loadSkill('scout');
-    if (!result.success || !result.skill) {
-      throw new Error(
-        'Scout skill is required but failed to load. ' +
-        `Error: ${result.error || 'Unknown error'}. ` +
-        'Please ensure .claude/skills/scout/SKILL.md exists and is valid.'
-      );
-    }
-    this.skill = result.skill;
+    this.skill = await loadSkillOrThrow('scout');
     this.logger.debug({
-      skillName: result.skill.name,
-      toolCount: result.skill.allowedTools.length,
-      contentLength: result.skill.content.length,
+      skillName: this.skill.name,
+      toolCount: this.skill.allowedTools.length,
+      contentLength: this.skill.content.length,
     }, 'Scout skill loaded');
   }
 
@@ -103,7 +95,8 @@ export class Scout {
    * Tool configuration comes from the skill file.
    */
   private createSdkOptions(): Record<string, unknown> {
-    const allowedTools = this.skill?.allowedTools || ['Write', 'WebSearch'];
+    // Skill is required, so allowedTools is always defined
+    const allowedTools = this.skill!.allowedTools;
 
     this.logger.debug({
       hasSkill: !!this.skill,

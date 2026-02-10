@@ -53,3 +53,14 @@ export const DIALOGUE = {
   /** Maximum number of iterations in the dialogue loop */
   MAX_ITERATIONS: 20,
 } as const;
+
+/**
+ * Message logging configuration
+ */
+export const MESSAGE_LOGGING = {
+  /** Directory for message logs */
+  LOGS_DIR: 'chat',
+
+  /** Regex to extract message IDs from MD files */
+  MD_PARSE_REGEX: /message_id:\s*([^\)]+)/g,
+} as const;

@@ -4,7 +4,7 @@
  * Architecture (Plan-and-Execute):
  * - Scout: Task initialization - creates Task.md with metadata
  * - Evaluator: Task completion evaluation
- * - TaskPlanner: Breaks down complex tasks into subtasks
+ * - Planner: Breaks down complex tasks into subtasks
  * - Executor: Executes individual subtasks
  * - DialogueOrchestrator: Manages direct Evaluator-Planner/Executor flow
  *
@@ -13,7 +13,7 @@
  * Flow 2: Task.md → Evaluator → Planner/Executor (plan + execute) → ...
  *
  * Plan-and-Execute Flow:
- * - TaskPlanner breaks down complex tasks into subtasks
+ * - Planner breaks down complex tasks into subtasks
  * - Executor runs each subtask with fresh SDK instances
  * - Sequential handoff with context passing
  * - Results aggregated for final output
@@ -24,8 +24,8 @@
  */
 
 // Core agents
-export { Scout } from './scout.js';
-export { Evaluator } from './evaluator.js';
+export { Scout } from '../agents/scout.js';
+export { Evaluator } from '../agents/evaluator.js';
 
 // Bridges
 export {

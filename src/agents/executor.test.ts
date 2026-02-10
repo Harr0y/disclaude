@@ -893,7 +893,7 @@ describe('Executor', () => {
     });
   });
 
-  describe('createExecutionPrompt - Private Method', () => {
+  describe('buildExecutionPrompt - Static Method', () => {
     it('should create prompt with all subtask fields', () => {
       const subtask: Subtask = {
         sequence: 1,
@@ -911,7 +911,7 @@ describe('Executor', () => {
         },
       };
 
-      const prompt = executor['createExecutionPrompt'](subtask, 'Context info', '/workspace');
+      const prompt = Executor.buildExecutionPrompt(subtask, 'Context info', '/workspace');
 
       expect(prompt).toContain('Test Title');
       expect(prompt).toContain('Test description');
@@ -943,7 +943,7 @@ describe('Executor', () => {
         },
       };
 
-      const prompt = executor['createExecutionPrompt'](subtask, 'Context', '/workspace');
+      const prompt = Executor.buildExecutionPrompt(subtask, 'Context', '/workspace');
 
       expect(prompt).toContain('None (first step)');
     });
@@ -964,13 +964,13 @@ describe('Executor', () => {
         },
       };
 
-      const prompt = executor['createExecutionPrompt'](subtask, 'Context', '/workspace');
+      const prompt = Executor.buildExecutionPrompt(subtask, 'Context', '/workspace');
 
       expect(prompt).not.toContain('Additional Context');
     });
   });
 
-  describe('formatMarkdownRequirements - Private Method', () => {
+  describe('formatMarkdownRequirements - Static Helper', () => {
     it('should return default message when no markdown requirements', () => {
       const subtask: Subtask = {
         sequence: 1,
@@ -984,7 +984,7 @@ describe('Executor', () => {
         },
       };
 
-      const result = executor['formatMarkdownRequirements'](subtask);
+      const result = Executor['formatMarkdownRequirements'](subtask);
 
       expect(result).toContain('summary.md');
       expect(result).toContain('What was accomplished');
@@ -1007,7 +1007,7 @@ describe('Executor', () => {
         },
       };
 
-      const result = executor['formatMarkdownRequirements'](subtask);
+      const result = Executor['formatMarkdownRequirements'](subtask);
 
       expect(result).toContain('Section 1 ✅ (Required)');
       expect(result).toContain('Section 2 ⚪ (Optional)');
@@ -1033,7 +1033,7 @@ describe('Executor', () => {
         },
       };
 
-      const result = executor['formatMarkdownRequirements'](subtask);
+      const result = Executor['formatMarkdownRequirements'](subtask);
 
       expect(result).toContain('### Test Section ✅ (Required)');
       expect(result).toContain('**Section ID**: `test-section`');

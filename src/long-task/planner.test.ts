@@ -1,12 +1,11 @@
 /**
- * Comprehensive tests for TaskPlanner class.
+ * Comprehensive tests for Planner class.
  * Tests task planning logic, iteration management, scout orchestration, and decision-making processes.
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { TaskPlanner } from './planner.js';
+import { Planner } from './planner.js';
 import type { LongTaskPlan } from './types.js';
-import * as sdkUtils from '../utils/sdk.js';
 
 // Mock dependencies
 vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
@@ -33,6 +32,7 @@ vi.mock('../config/index.js', () => ({
 
 vi.mock('../task/skill-loader.js', () => ({
   loadSkill: vi.fn(),
+  loadSkillOrThrow: vi.fn(),
 }));
 
 vi.mock('../utils/logger.js', () => ({
@@ -45,10 +45,12 @@ vi.mock('../utils/logger.js', () => ({
 }));
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { loadSkill } from '../task/skill-loader.js';
+import { loadSkill, loadSkillOrThrow } from '../task/skill-loader.js';
 
-describe('TaskPlanner', () => {
-  let planner: TaskPlanner;
+const mockedLoadSkillOrThrow = vi.mocked(loadSkillOrThrow);
+
+describe('Planner', () => {
+  let planner: Planner;
   let apiKey: string;
   let model: string;
   let apiBaseUrl: string | undefined;
@@ -57,7 +59,7 @@ describe('TaskPlanner', () => {
     apiKey = 'test-api-key';
     model = 'claude-3-5-sonnet-20241022';
     apiBaseUrl = undefined;
-    planner = new TaskPlanner(apiKey, model, apiBaseUrl);
+    planner = new Planner({ apiKey, model, apiBaseUrl });
     vi.clearAllMocks();
   });
 
@@ -67,14 +69,14 @@ describe('TaskPlanner', () => {
 
   describe('Constructor', () => {
     it('should create planner with API key and model', () => {
-      expect(planner).toBeInstanceOf(TaskPlanner);
+      expect(planner).toBeInstanceOf(Planner);
       expect(planner['apiKey']).toBe(apiKey);
       expect(planner['model']).toBe(model);
     });
 
     it('should store API base URL if provided', () => {
       const customBaseUrl = 'https://custom.api.url';
-      const plannerWithBaseUrl = new TaskPlanner(apiKey, model, customBaseUrl);
+      const plannerWithBaseUrl = new Planner({ apiKey, model, apiBaseUrl: customBaseUrl });
       expect(plannerWithBaseUrl['apiBaseUrl']).toBe(customBaseUrl);
     });
 
@@ -97,11 +99,10 @@ describe('TaskPlanner', () => {
         name: 'planner',
         content: 'Custom planner instructions',
         allowedTools: ['Read', 'Glob', 'Grep'],
+        disableModelInvocation: false,
+        description: 'Planner skill',
       };
-      vi.mocked(loadSkill).mockResolvedValue({
-        success: true,
-        skill: mockSkill,
-      });
+      mockedLoadSkillOrThrow.mockResolvedValue(mockSkill);
 
       await planner.initialize();
 
@@ -110,15 +111,9 @@ describe('TaskPlanner', () => {
     });
 
     it('should handle missing skill gracefully', async () => {
-      vi.mocked(loadSkill).mockResolvedValue({
-        success: false,
-        error: 'Skill file not found',
-      });
+      mockedLoadSkillOrThrow.mockRejectedValue(new Error('Skill file not found'));
 
-      await planner.initialize();
-
-      expect(planner['skill']).toBeUndefined();
-      expect(planner['initialized']).toBe(true);
+      await expect(planner.initialize()).rejects.toThrow('Skill file not found');
     });
 
     it('should not initialize twice', async () => {
@@ -126,23 +121,26 @@ describe('TaskPlanner', () => {
         name: 'planner',
         content: 'Custom instructions',
         allowedTools: ['Read'],
+        disableModelInvocation: false,
+        description: 'Planner skill',
       };
-      vi.mocked(loadSkill).mockResolvedValue({
-        success: true,
-        skill: mockSkill,
-      });
+      mockedLoadSkillOrThrow.mockResolvedValue(mockSkill);
 
       await planner.initialize();
       await planner.initialize();
 
-      expect(loadSkill).toHaveBeenCalledTimes(1);
+      expect(mockedLoadSkillOrThrow).toHaveBeenCalledTimes(1);
     });
 
     it('should be idempotent', async () => {
-      vi.mocked(loadSkill).mockResolvedValue({
-        success: false,
-        error: 'Not found',
-      });
+      const mockSkill = {
+        name: 'planner',
+        content: 'Custom instructions',
+        allowedTools: ['Read'],
+        disableModelInvocation: false,
+        description: 'Planner skill',
+      };
+      mockedLoadSkillOrThrow.mockResolvedValue(mockSkill);
 
       await planner.initialize();
       const firstCallInitialized = planner['initialized'];
@@ -151,7 +149,7 @@ describe('TaskPlanner', () => {
       const secondCallInitialized = planner['initialized'];
 
       expect(firstCallInitialized).toBe(true);
-      expect(secondCallInitialized).toBe(true);
+      expect(mockedLoadSkillOrThrow).toHaveBeenCalledTimes(1);
     });
   });
 
@@ -199,69 +197,24 @@ describe('TaskPlanner', () => {
     });
   });
 
-  describe('createPlanningPrompt()', () => {
+  describe('buildPlanningPrompt()', () => {
     it('should use skill-based prompt when skill is loaded', async () => {
       const customPrompt = 'Custom planning instructions';
-      vi.mocked(loadSkill).mockResolvedValue({
-        success: true,
-        skill: {
-          name: 'planner',
-          content: customPrompt,
-          allowedTools: ['Read'],
-        },
+      mockedLoadSkillOrThrow.mockResolvedValue({
+        name: 'planner',
+        description: 'Planner skill',
+        content: customPrompt,
+        allowedTools: ['Read'],
+        disableModelInvocation: false,
       });
 
       await planner.initialize();
-      const prompt = planner['createPlanningPrompt']('Test request');
+      const prompt = Planner.buildPlanningPrompt('Test request', planner['skill']?.content);
 
       expect(prompt).toContain(customPrompt);
       expect(prompt).toContain('Test request');
     });
 
-    it('should use fallback prompt when skill is not loaded', async () => {
-      vi.mocked(loadSkill).mockResolvedValue({
-        success: false,
-        error: 'Not found',
-      });
-
-      await planner.initialize();
-      const prompt = planner['createPlanningPrompt']('Test request');
-
-      expect(prompt).toContain('task planning expert');
-      expect(prompt).toContain('Test request');
-    });
-
-    it('should include user request in prompt', () => {
-      const userRequest = 'Build a web application';
-      const prompt = planner['createPlanningPrompt'](userRequest);
-
-      expect(prompt).toContain(userRequest);
-    });
-
-    it('should specify JSON response format in fallback', () => {
-      const prompt = planner['createPlanningPrompt']('Test');
-      expect(prompt).toContain('JSON');
-    });
-
-    it('should include subtask structure requirements', () => {
-      const prompt = planner['createPlanningPrompt']('Test');
-      expect(prompt).toContain('subtasks');
-      expect(prompt).toContain('sequence');
-      expect(prompt).toContain('inputs');
-      expect(prompt).toContain('outputs');
-    });
-
-    it('should include markdown requirements specification', () => {
-      const prompt = planner['createPlanningPrompt']('Test');
-      expect(prompt).toContain('markdownRequirements');
-      expect(prompt).toContain('summaryFile');
-    });
-
-    it('should mention inter-step dependencies', () => {
-      const prompt = planner['createPlanningPrompt']('Test');
-      expect(prompt).toContain('Inter-Step Dependencies');
-      expect(prompt).toContain('#');
-    });
   });
 
   describe('extractPlanFromResponse()', () => {
@@ -733,9 +686,12 @@ describe('TaskPlanner', () => {
     };
 
     beforeEach(() => {
-      vi.mocked(loadSkill).mockResolvedValue({
-        success: false,
-        error: 'Not found',
+      mockedLoadSkillOrThrow.mockResolvedValue({
+        name: 'planner',
+        description: 'Planner agent skill',
+        content: 'You are a planning expert.',
+        allowedTools: ['Read', 'Write'],
+        disableModelInvocation: false,
       });
     });
 
@@ -826,7 +782,7 @@ describe('TaskPlanner', () => {
 
     it('should use custom API base URL if provided', async () => {
       const customBaseUrl = 'https://custom.api.url';
-      const plannerWithBaseUrl = new TaskPlanner(apiKey, model, customBaseUrl);
+      const plannerWithBaseUrl = new Planner({ apiKey, model, apiBaseUrl: customBaseUrl });
       const mockQuery = vi.fn().mockReturnValue(
         (async function* () {
           yield { content: JSON.stringify(mockPlanResponse), metadata: {} };
@@ -910,11 +866,10 @@ describe('TaskPlanner', () => {
         name: 'planner',
         content: 'Custom instructions',
         allowedTools: ['Read', 'Glob'],
+        disableModelInvocation: false,
+        description: 'Planner skill',
       };
-      vi.mocked(loadSkill).mockResolvedValue({
-        success: true,
-        skill: mockSkill,
-      });
+      mockedLoadSkillOrThrow.mockResolvedValue(mockSkill);
 
       const mockQuery = vi.fn().mockReturnValue(
         (async function* () {
@@ -938,16 +893,20 @@ describe('TaskPlanner', () => {
 
       await planner.planTask('Test request');
 
-      expect(vi.mocked(query).mock.calls[0][0].options.allowedTools).toEqual(['Read', 'Glob', 'Grep', 'Write', 'Bash']);
+      // Skill defines allowedTools: ['Read', 'Write']
+      expect(vi.mocked(query).mock.calls[0][0].options.allowedTools).toEqual(['Read', 'Write']);
     });
   });
 
   describe('Edge Cases', () => {
     beforeEach(async () => {
       // Mock loadSkill for edge cases
-      vi.mocked(loadSkill).mockResolvedValue({
-        success: false,
-        error: 'Not found',
+      mockedLoadSkillOrThrow.mockResolvedValue({
+        name: 'planner',
+        description: 'Planner agent skill',
+        content: 'You are a planning expert.',
+        allowedTools: ['Read', 'Write'],
+        disableModelInvocation: false,
       });
     });
 

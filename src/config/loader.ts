@@ -5,7 +5,8 @@
  */
 
 import { readFileSync, existsSync } from 'fs';
-import { resolve } from 'path';
+import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import * as yaml from 'js-yaml';
 import { createLogger } from '../utils/logger.js';
 import type { DisclaudeConfig, LoadedConfig, ConfigFileInfo } from './types.js';
@@ -27,8 +28,16 @@ const CONFIG_FILE_NAMES = [
  */
 const SEARCH_PATHS = [
   process.cwd(), // Current working directory
+  // If workspace directory is configured, also search parent directory
+  process.env.WORKSPACE_DIR ? resolve(process.env.WORKSPACE_DIR, '..') : '',
+  // Import meta URL directory (for bundled executables)
+  import.meta.url ? resolve(dirname(fileURLToPath(import.meta.url)), '..') : '',
+  import.meta.url ? resolve(dirname(fileURLToPath(import.meta.url)), '..', '..') : '',
   process.env.HOME || '', // Home directory
 ].filter(Boolean);
+
+// Helper to resolve import.meta.url (defined after import to avoid hoisting issues)
+import { fileURLToPath } from 'url';
 
 /**
  * Find the configuration file in the search paths.

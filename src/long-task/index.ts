@@ -6,8 +6,8 @@
  * isolation and result persistence.
  */
 
-export { TaskPlanner } from './planner.js';
-export { Executor } from './executor.js';
+export { Planner } from './Planner.js';
+export { Executor } from '../agents/executor.js';
 export { LongTaskTracker } from './tracker.js';
 export { TaskPlanExtractor } from './task-plan-extractor.js';
 export type {

@@ -22,7 +22,7 @@ export interface CommandHandlerContext {
 }
 
 /**
- * Handle /task command - start structured task workflow (Scout + TaskPlanner)
+ * Handle /task command - start structured task workflow (Scout + Planner)
  */
 export async function handleTaskCommand(
   context: CommandHandlerContext,

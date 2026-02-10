@@ -6,9 +6,9 @@ import { describe, it, expect } from 'vitest';
 
 describe('Long Task Module Exports', () => {
   describe('Class Exports', () => {
-    it('should export TaskPlanner class', async () => {
+    it('should export Planner class', async () => {
       const module = await import('./index.js');
-      expect(module.TaskPlanner).toBeDefined();
+      expect(module.Planner).toBeDefined();
     });
 
     it('should export Executor class', async () => {

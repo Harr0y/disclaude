@@ -22,6 +22,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
 vi.mock('../config/index.js', () => ({
   Config: {
     getWorkspaceDir: () => '/mock/workspace',
+    getSkillsDir: () => '/mock/skills',
   },
 }));
 
@@ -34,8 +35,9 @@ vi.mock('../utils/logger.js', () => ({
   })),
 }));
 
-vi.mock('./skill-loader.js', () => ({
+vi.mock('../task/skill-loader.js', () => ({
   loadSkill: vi.fn(),
+  loadSkillOrThrow: vi.fn(),
   buildScoutPrompt: vi.fn((prompt, context, _skill) => {
     return `[Context: ${context.taskPath}]\n${prompt}`;
   }),
@@ -53,7 +55,7 @@ vi.mock('../utils/sdk.js', () => ({
 }));
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
-import { loadSkill } from './skill-loader.js';
+import { loadSkill, loadSkillOrThrow } from '../task/skill-loader.js';
 import { parseSDKMessage, buildSdkEnv } from '../utils/sdk.js';
 
 const mockedQuery = vi.mocked(query);

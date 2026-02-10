@@ -40,7 +40,7 @@ import { parseSDKMessage, buildSdkEnv } from '../utils/sdk.js';
 import { Config } from '../config/index.js';
 import type { AgentMessage, AgentInput } from '../types/agent.js';
 import { createLogger } from '../utils/logger.js';
-import { loadSkill, type ParsedSkill } from './skill-loader.js';
+import { loadSkillOrThrow, type ParsedSkill } from '../task/skill-loader.js';
 
 const logger = createLogger('Evaluator');
 
@@ -106,12 +106,12 @@ export class Evaluator {
       return;
     }
 
-    // Load skill
-    const skillResult = await loadSkill('evaluator');
-    if (skillResult.success && skillResult.skill) {
-      this.skill = skillResult.skill;
-      this.logger.debug({ skillName: 'evaluator' }, 'Evaluator skill loaded');
-    }
+    // Load skill (required)
+    this.skill = await loadSkillOrThrow('evaluator');
+    this.logger.debug({
+      skillName: this.skill.name,
+      toolCount: this.skill.allowedTools.length,
+    }, 'Evaluator skill loaded');
 
     this.initialized = true;
     this.logger.debug('Evaluator initialized');
@@ -158,7 +158,8 @@ export class Evaluator {
     }
 
     // Create SDK options for Evaluator
-    const allowedTools = this.skill?.allowedTools || ['task_done'];
+    // Skill is required, so allowedTools is always defined
+    const allowedTools = this.skill!.allowedTools;
     // Note: send_user_feedback and send_file_to_feishu are intentionally NOT included (Reporter's job)
 
     const sdkOptions: Record<string, unknown> = {

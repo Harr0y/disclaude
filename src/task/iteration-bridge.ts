@@ -8,12 +8,12 @@
  *
  * **Key Components:**
  * - **Evaluator** (Phase 1): Specialized in task completion evaluation
- * - **TaskPlanner** (Phase 2): Breaks down tasks into subtasks
+ * - **Planner** (Phase 2): Breaks down tasks into subtasks
  * - **Worker** (Phase 3 - simple): Executes simple tasks directly
  * - **Executor** (Phase 3 - complex): Executes individual subtasks from plan
  *
  * **Plan-and-Execute Architecture:**
- * - TaskPlanner decomposes complex tasks into subtasks
+ * - Planner decomposes complex tasks into subtasks
  * - For simple tasks: Worker executes directly
  * - For complex tasks: Executor runs each subtask with fresh Worker instances
  * - Each subtask executed by fresh agent instance (isolation)
@@ -31,10 +31,10 @@
 
 import type { AgentMessage } from '../types/agent.js';
 import { extractText } from '../utils/sdk.js';
-import { Evaluator, type EvaluatorConfig, type EvaluationResult } from './evaluator.js';
-import { Reporter } from './reporter.js';
-import { TaskPlanner } from '../long-task/planner.js';
-import { Executor } from '../long-task/executor.js';
+import { Evaluator, type EvaluatorConfig, type EvaluationResult } from '../agents/evaluator.js';
+import { Reporter } from '../agents/reporter.js';
+import { Planner } from '../long-task/Planner.js';
+import { Executor } from '../agents/executor.js';
 import type { LongTaskConfig, SubtaskResult, LongTaskPlan, SubtaskProgressEvent } from '../long-task/types.js';
 import { createLogger } from '../utils/logger.js';
 import { parseTaskMd } from './prompt-builder.js';
@@ -135,7 +135,7 @@ export class IterationBridge {
    * - task_done decision happens in Phase 1 (Evaluator)
    * - First iteration: No task_done possible (no Worker output yet)
    * - Evaluator provides missing_items directly to execution phase
-   * - All tasks use TaskPlanner → Executor flow (no simple/direct mode)
+   * - All tasks use Planner → Executor flow (no simple/direct mode)
    *
    * @returns Async iterable of AgentMessage
    */
@@ -210,7 +210,7 @@ export class IterationBridge {
     }, 'Phase 2: Execution phase with Evaluator feedback (streaming to user)');
 
     // Always use planning mode (Plan-and-Execute architecture)
-    logger.info('Using Plan-and-Execute mode with TaskPlanner and Executor');
+    logger.info('Using Plan-and-Execute mode with Planner and Executor');
     yield* this.executeWithPlanning(executionInstruction, taskMetadata);
 
     logger.info({
@@ -233,11 +233,11 @@ export class IterationBridge {
       messageType: 'status',
     };
 
-    const planner = new TaskPlanner(
-      this.plannerConfig.apiKey,
-      this.plannerConfig.model,
-      this.plannerConfig.apiBaseUrl
-    );
+    const planner = new Planner({
+      apiKey: this.plannerConfig.apiKey,
+      model: this.plannerConfig.model,
+      apiBaseUrl: this.plannerConfig.apiBaseUrl,
+    });
     let plan: LongTaskPlan;
 
     try {

@@ -82,23 +82,8 @@ describe('TaskTracker', () => {
     });
   });
 
-  describe('hasTaskRecord', () => {
-    it('should return true when task file exists', async () => {
-      mockedFs.access.mockResolvedValueOnce(undefined);
-
-      const hasRecord = await taskTracker.hasTaskRecord('om_msg123');
-
-      expect(hasRecord).toBe(true);
-    });
-
-    it('should return false when task file does not exist', async () => {
-      mockedFs.access.mockRejectedValueOnce(new Error('ENOENT'));
-
-      const hasRecord = await taskTracker.hasTaskRecord('om_msg123');
-
-      expect(hasRecord).toBe(false);
-    });
-  });
+  // Note: hasTaskRecord removed - deduplication now handled by MessageLogger
+  // This test suite removed as the method no longer exists
 
   describe('saveTaskRecord', () => {
     it('should save task record with metadata', async () => {

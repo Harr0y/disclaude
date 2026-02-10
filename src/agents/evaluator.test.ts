@@ -28,6 +28,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', () => ({
 vi.mock('../config/index.js', () => ({
   Config: {
     getWorkspaceDir: vi.fn(() => '/workspace'),
+    getSkillsDir: vi.fn(() => '/mock/skills'),
     getAgentConfig: vi.fn(() => ({
       apiKey: 'test-api-key',
       model: 'test-model',
@@ -45,18 +46,24 @@ vi.mock('../utils/sdk.js', () => ({
   buildSdkEnv: vi.fn(() => ({})),
 }));
 
-vi.mock('./skill-loader.js', () => ({
+vi.mock('../task/skill-loader.js', () => ({
   loadSkill: vi.fn().mockResolvedValue({
     success: true,
     skill: {
       allowedTools: ['task_done', 'read_file'],
     },
   }),
+  loadSkillOrThrow: vi.fn().mockResolvedValue({
+    allowedTools: ['task_done'],
+    content: 'mock skill content',
+    name: 'evaluator',
+    description: 'Mock evaluator skill',
+  }),
 }));
 
 import { query } from '@anthropic-ai/claude-agent-sdk';
 import { parseSDKMessage, buildSdkEnv } from '../utils/sdk.js';
-import { loadSkill } from './skill-loader.js';
+import { loadSkill, loadSkillOrThrow } from '../task/skill-loader.js';
 
 const mockedQuery = query as unknown as ReturnType<typeof vi.fn>;
 
