@@ -40,8 +40,8 @@ describe('isCommand', () => {
     expect(isCommand('/cancel')).toBe(false);
   });
 
-  it('should return false for /reset', () => {
-    expect(isCommand('/reset')).toBe(false);
+  it('should return true for /reset', () => {
+    expect(isCommand('/reset')).toBe(true);
   });
 
   it('should return false for non-command text', () => {
@@ -125,9 +125,9 @@ describe('executeCommand', () => {
     expect(result).toBe(false);
   });
 
-  it('should return false for /reset (passed to SDK)', async () => {
+  it('should return true for /reset (handled by command handler)', async () => {
     const result = await executeCommand(mockContext, '/reset');
-    expect(result).toBe(false);
+    expect(result).toBe(true);
   });
 
   it('should return false for non-command', async () => {

@@ -20,7 +20,7 @@ import { FeishuOutputAdapter } from '../utils/output-adapter.js';
 import type { TaskTracker } from '../utils/task-tracker.js';
 import type { LongTaskTracker, TaskPlanData, DialogueTaskPlan } from '../long-task/index.js';
 import { handleError, ErrorCategory } from '../utils/error-handler.js';
-import type { Logger } from '../utils/logger.js';
+import type { Logger } from 'pino';
 
 export interface MessageCallbacks {
   sendMessage: (chatId: string, text: string) => Promise<void>;
@@ -68,11 +68,8 @@ export class TaskFlowOrchestrator {
     const taskPath = this.taskTracker.getDialogueTaskPath(messageId);
 
     const scout = new Scout({
-      apiKey: agentConfig.apiKey,
-      model: agentConfig.model,
-      apiBaseUrl: agentConfig.apiBaseUrl,
+      skillName: 'scout',
     });
-    await scout.initialize();
 
     // Set context for Task.md creation
     scout.setTaskContext({
@@ -139,7 +136,7 @@ export class TaskFlowOrchestrator {
 
     // Create bridge with agent configs (not instances)
     const bridge = new DialogueOrchestrator({
-      plannerConfig: {
+      evaluatorConfig: {
         apiKey: agentConfig.apiKey,
         model: agentConfig.model,
         apiBaseUrl: agentConfig.apiBaseUrl,

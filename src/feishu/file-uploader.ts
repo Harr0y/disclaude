@@ -235,7 +235,7 @@ export async function sendFileMessage(
       fileKey: uploadResult.fileKey,
       fileName: uploadResult.fileName,
       msgType,
-      messageId: response?.message_id
+      messageId: response?.data?.message_id
     }, 'File message sent successfully');
 
   } catch (error) {

@@ -1,12 +1,11 @@
 /**
  * Long task module - orchestrates complex multi-step tasks.
  *
- * Provides a workflow for breaking down complex user requests into
- * linear subtasks, each handled by an isolated agent with context
- * isolation and result persistence.
+ * Provides a workflow for executing tasks directly without planning.
+ * Each task is handled by an isolated agent with context isolation
+ * and result persistence.
  */
 
-export { Planner } from './planner.js';
 export { Executor } from '../agents/executor.js';
 export { LongTaskTracker } from './tracker.js';
 export { TaskPlanExtractor } from './task-plan-extractor.js';

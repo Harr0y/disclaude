@@ -16,7 +16,7 @@ import * as lark from '@larksuiteoapi/node-sdk';
 import { buildTextContent } from './content-builder.js';
 import { messageLogger } from './message-logger.js';
 import { handleError, ErrorCategory } from '../utils/error-handler.js';
-import type { Logger } from '../utils/logger.js';
+import type { Logger } from 'pino';
 
 export interface MessageSenderConfig {
   client: lark.Client;

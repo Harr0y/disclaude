@@ -15,7 +15,7 @@
  * - Error handling
  */
 
-import { describe, it, expect, vi, beforeEach, afterEach, MockedFunction } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventEmitter } from 'events';
 import { FeishuBot } from './bot.js';
 import * as lark from '@larksuiteoapi/node-sdk';
@@ -23,7 +23,7 @@ import { TaskTracker } from '../utils/task-tracker.js';
 import { LongTaskTracker } from '../long-task/index.js';
 import { Pilot } from '../pilot/index.js';
 import { messageHistoryManager } from './message-history.js';
-import { attachmentManager, type FileAttachment } from './attachment-manager.js';
+import { attachmentManager } from './attachment-manager.js';
 import { Config } from '../config/index.js';
 import * as fs from 'fs/promises';
 import { Scout, DialogueOrchestrator } from '../task/index.js';
@@ -74,7 +74,7 @@ vi.mock('./content-builder.js', () => ({
 }));
 
 vi.mock('../utils/error-handler.js', () => ({
-  handleError: vi.fn((error, context, options) => ({
+  handleError: vi.fn((_error, _context, _options) => ({
     userMessage: 'Test error message',
     message: 'Original error message',
   })),
@@ -116,7 +116,6 @@ import { buildTextContent } from './content-builder.js';
 import { handleError, ErrorCategory } from '../utils/error-handler.js';
 import { uploadAndSendFile } from './file-uploader.js';
 import { downloadFile, getFileStats } from './file-downloader.js';
-import { setMessageSentCallback } from '../mcp/feishu-context-mcp.js';
 
 describe('FeishuBot', () => {
   let bot: FeishuBot;

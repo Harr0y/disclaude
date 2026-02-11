@@ -57,11 +57,8 @@ async function executeOnce(
   const taskPath = taskTracker.getDialogueTaskPath(messageId);
 
   const scout = new Scout({
-    apiKey: agentConfig.apiKey,
-    model: agentConfig.model,
-    apiBaseUrl: agentConfig.apiBaseUrl,
+    skillName: 'scout',
   });
-  await scout.initialize();
 
   // Set context for Task.md creation
   // Use system username for CLI mode, fallback to 'cli-user'
@@ -99,7 +96,7 @@ async function executeOnce(
   const sendCardToFeishu = feishuChatId ? createFeishuCardSender() : async (_chatId: string, _card: Record<string, unknown>) => {};
 
   const bridge = new DialogueOrchestrator({
-    plannerConfig: {
+    evaluatorConfig: {
       apiKey: agentConfig.apiKey,
       model: agentConfig.model,
       apiBaseUrl: agentConfig.apiBaseUrl,

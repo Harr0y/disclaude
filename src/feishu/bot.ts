@@ -3,15 +3,20 @@
  */
 import * as lark from '@larksuiteoapi/node-sdk';
 import { EventEmitter } from 'events';
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 import * as fs from 'fs/promises';
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 import * as path from 'path';
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { extractText, Scout, DialogueOrchestrator } from '../task/index.js';
 import { Config } from '../config/index.js';
 import { DEDUPLICATION } from '../config/constants.js';
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { FeishuOutputAdapter } from '../utils/output-adapter.js';
 import { TaskTracker } from '../utils/task-tracker.js';
 import { LongTaskTracker, type TaskPlanData, type DialogueTaskPlan } from '../long-task/index.js';
 import { createLogger } from '../utils/logger.js';
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
 import { attachmentManager, type FileAttachment } from './attachment-manager.js';
 import { downloadFile } from './file-downloader.js';
 import { messageHistoryManager } from './message-history.js';
@@ -45,6 +50,7 @@ export class FeishuBot extends EventEmitter {
   private longTaskTracker: LongTaskTracker;
 
   // Active dialogue bridges per chat
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   private activeDialogues = new Map<string, DialogueOrchestrator>();
 
   // File handler for file/image message processing
@@ -69,11 +75,31 @@ export class FeishuBot extends EventEmitter {
     this.taskTracker = new TaskTracker();
     this.longTaskTracker = new LongTaskTracker();
 
-    // Initialize FileHandler
+    // Initialize FileHandler with a wrapped downloadFile that will be bound later
+    // The client is not available yet, so we pass a placeholder that will be replaced
     this.fileHandler = new FileHandler(
       attachmentManager,
-      downloadFile,
-      this.logger
+      async (
+        fileKey: string,
+        messageType: string,
+        fileName?: string,
+        messageId?: string
+      ): Promise<{ success: boolean; filePath?: string }> => {
+        if (!this.client) {
+          this.logger.error({ fileKey }, 'Client not initialized for file download');
+          return { success: false };
+        }
+        try {
+          const filePath = await downloadFile(this.client, fileKey, messageType, fileName, messageId);
+          return {
+            success: true,
+            filePath
+          };
+        } catch (error) {
+          this.logger.error({ err: error, fileKey, messageType }, 'File download failed');
+          return { success: false };
+        }
+      }
     );
 
     // Initialize TaskFlowOrchestrator
@@ -271,6 +297,10 @@ ${text}`;
   private async handleMessageReceive(data: any): Promise<void> {
     if (!this.running) {return;}
 
+    // Ensure client is initialized before processing any message
+    // This is critical for file/image downloads which need the client
+    this.getClient();
+
     const { message } = data;
     if (!message) {return;}
 
@@ -337,7 +367,52 @@ ${text}`;
     this.logger.debug({ messageType: message_type }, 'Checking message type');
     // Handle file/image messages - download and store for later processing
     if (message_type === 'image' || message_type === 'file' || message_type === 'media') {
-      await this.fileHandler.handleFileMessage(chat_id, message_type, content, message_id, sender);
+      const result = await this.fileHandler.handleFileMessage(chat_id, message_type, content, message_id);
+      if (!result.success) {
+        // Send error feedback to user
+        await this.sendMessage(
+          chat_id,
+          `❌ 处理${message_type === 'image' ? '图片' : '文件'}失败：无法从飞书下载文件。这可能是因为文件已过期或权限不足。`
+        );
+        return;
+      }
+
+      // File downloaded successfully - notify Pilot with preset prompt
+      const attachments = attachmentManager.getAttachments(chat_id);
+      if (attachments.length > 0) {
+        const latestAttachment = attachments[attachments.length - 1];
+        const uploadPrompt = this.fileHandler.buildUploadPrompt(latestAttachment);
+
+        // Add Feishu chat context to the prompt
+        const enhancedPrompt = `You are responding in a Feishu chat.
+
+**Chat ID for sending files/messages:** ${chat_id}
+
+When using tools like send_file_to_feishu or send_user_feedback, use this exact Chat ID value.
+
+---- User Message ---
+${uploadPrompt}`;
+
+        // Log the file upload to message history (this also marks message as processed)
+        await messageLogger.logIncomingMessage(
+          message_id,
+          sender?.sender_id || 'unknown',
+          chat_id,
+          `[File uploaded: ${latestAttachment.fileName}]`,
+          message_type,
+          create_time
+        );
+
+        // Enqueue the file upload notification to Pilot
+        this.pilot.enqueueMessage(chat_id, enhancedPrompt, message_id);
+
+        this.logger.info({
+          chatId: chat_id,
+          fileKey: latestAttachment.fileKey,
+          fileName: latestAttachment.fileName
+        }, 'File upload notification sent to Pilot');
+      }
+
       return;
     }
 

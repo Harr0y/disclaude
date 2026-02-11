@@ -3,7 +3,7 @@
  */
 
 // Re-export SubtaskProgressEvent from executor
-export type { SubtaskProgressEvent } from './executor.js';
+export type { SubtaskProgressEvent } from '../agents/executor.js';
 
 /**
  * Input specification for a subtask.
