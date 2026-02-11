@@ -8,6 +8,7 @@ import { Config } from './config/index.js';
 import { initLogger, flushLogger, getRootLogger } from './utils/logger.js';
 import { handleError, ErrorCategory } from './utils/error-handler.js';
 import { loadEnvironmentScripts } from './utils/env-loader.js';
+import { setupSkillsInWorkspace } from './utils/skills-setup.js';
 import packageJson from '../package.json' assert { type: 'json' };
 
 /**
@@ -42,6 +43,19 @@ async function main(): Promise<void> {
   } catch (error) {
     // Don't fail the entire application if env loading fails
     logger.warn({ err: error }, 'Failed to load environment scripts, continuing anyway');
+  }
+
+  // Copy skills to workspace .claude/skills for SDK to load via settingSources
+  try {
+    const skillsResult = await setupSkillsInWorkspace();
+    if (skillsResult.success) {
+      logger.info('Skills copied to workspace .claude/skills');
+    } else {
+      logger.warn({ error: skillsResult.error }, 'Failed to copy skills to workspace, continuing anyway');
+    }
+  } catch (error) {
+    // Don't fail the entire application if skills setup fails
+    logger.warn({ err: error }, 'Failed to setup skills in workspace, continuing anyway');
   }
 
   try {

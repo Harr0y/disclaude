@@ -36,9 +36,6 @@ const SEARCH_PATHS = [
   process.env.HOME || '', // Home directory
 ].filter(Boolean);
 
-// Helper to resolve import.meta.url (defined after import to avoid hoisting issues)
-import { fileURLToPath } from 'url';
-
 /**
  * Find the configuration file in the search paths.
  *

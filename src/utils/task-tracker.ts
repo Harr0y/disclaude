@@ -3,9 +3,8 @@
  *
  * Directory structure:
  * tasks/
- * └── regular/              # Dialogue tasks (Scout → dialogue execution)
- *     └── {message_id}/
- *         └── task.md
+ * └── {message_id}/         # Dialogue tasks (Scout → dialogue execution)
+ *     └── task.md
  *
  * NOTE: Task directories are for workflow (Scout → DialogueOrchestrator).
  * Message deduplication is handled by MessageLogger using message ID parsing from MD files.
@@ -35,12 +34,10 @@ export interface TaskDefinitionDetails {
  */
 export class TaskTracker {
   private readonly tasksDir: string;
-  private readonly regularTasksDir: string;
 
   constructor(baseDir?: string) {
     const workspaceDir = baseDir || Config.getWorkspaceDir();
     this.tasksDir = path.join(workspaceDir, 'tasks');
-    this.regularTasksDir = path.join(this.tasksDir, 'regular');
   }
 
   /**
@@ -55,24 +52,13 @@ export class TaskTracker {
   }
 
   /**
-   * Ensure regular tasks subdirectory exists.
-   */
-  private async ensureRegularTasksDir(): Promise<void> {
-    try {
-      await fs.mkdir(this.regularTasksDir, { recursive: true });
-    } catch (error) {
-      console.error('Failed to create regular tasks directory:', error);
-    }
-  }
-
-  /**
    * Ensure a specific task directory exists.
    * @param messageId - Unique message identifier
    */
   private async ensureTaskDir(messageId: string): Promise<string> {
-    await this.ensureRegularTasksDir();
+    await this.ensureTasksDir();
     const sanitized = messageId.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const taskDir = path.join(this.regularTasksDir, sanitized);
+    const taskDir = path.join(this.tasksDir, sanitized);
     try {
       await fs.mkdir(taskDir, { recursive: true });
       return taskDir;
@@ -87,17 +73,17 @@ export class TaskTracker {
    * @param messageId - Unique message identifier
    */
   private ensureTaskDirSync(messageId: string): string {
-    const dirExists = syncFs.existsSync(this.regularTasksDir);
+    const dirExists = syncFs.existsSync(this.tasksDir);
     if (!dirExists) {
       try {
-        syncFs.mkdirSync(this.regularTasksDir, { recursive: true });
+        syncFs.mkdirSync(this.tasksDir, { recursive: true });
       } catch (error) {
         console.error('Failed to create regular tasks directory:', error);
         throw error;
       }
     }
     const sanitized = messageId.replace(/[^a-zA-Z0-9_-]/g, '_');
-    const taskDir = path.join(this.regularTasksDir, sanitized);
+    const taskDir = path.join(this.tasksDir, sanitized);
     const taskDirExists = syncFs.existsSync(taskDir);
     if (!taskDirExists) {
       try {
@@ -117,7 +103,7 @@ export class TaskTracker {
     // Sanitize message_id to make it a valid filename
     // Replace characters that are invalid in filenames
     const sanitized = messageId.replace(/[^a-zA-Z0-9_-]/g, '_');
-    return path.join(this.regularTasksDir, sanitized, 'task.md');
+    return path.join(this.tasksDir, sanitized, 'task.md');
   }
 
   /**
@@ -237,7 +223,7 @@ ${metadata.text}
    */
   getDialogueTaskPath(messageId: string): string {
     const sanitized = messageId.replace(/[^a-zA-Z0-9_-]/g, '_');
-    return path.join(this.regularTasksDir, sanitized, 'task.md');
+    return path.join(this.tasksDir, sanitized, 'task.md');
   }
 
   /**

@@ -4,9 +4,16 @@
  * ## Skill as Behavior Pattern
  *
  * This module implements the "Skill as Behavior" pattern where:
- * - Skill content becomes the agent's system prompt (static behavior)
  * - Skill frontmatter defines tool access and metadata
+ * - Skill content (when present) provides agent's system prompt (static behavior)
  * - Runtime prompts provide task-specific instructions (dynamic context)
+ *
+ * ## Special Case: Scout Agent
+ *
+ * **Scout agent uses a direct prompt template** defined in `prompt-builder.ts`:
+ * - Scout's prompt structure is explicitly defined in code (not from skill files)
+ * - The skill file for Scout is still required for frontmatter (allowed-tools, etc.)
+ * - This ensures Scout's prompt template is stable and predictable
  *
  * ## Separation of Concerns
  *
@@ -23,28 +30,36 @@
  * - Iteration-specific directives
  * - Generated dynamically per request
  *
+ * **Direct templates (prompt-builder.ts)**:
+ * - Scout uses a direct template for its runtime prompt
+ * - Ensures stability and predictability of prompt structure
+ *
  * ## Key Benefits
  *
  * 1. **Single Source of Truth**: Agent behavior defined once in SKILL.md
  * 2. **No Redundancy**: Runtime prompts don't repeat static behavior
  * 3. **Maintainability**: Change behavior in one place
  * 4. **Efficiency**: Smaller runtime prompts = less token usage
+ * 5. **Stability**: Direct templates (like Scout's) won't change unexpectedly
  *
  * ## File Format
  *
  * SKILL.md files use YAML frontmatter for metadata:
  * ```yaml
  * ---
- * name: scout
- * description: Task initialization specialist...
- * disable-model-invocation: true
- * allowed-tools: Read, Write, Glob, Grep, WebSearch, Bash, LSP
+ * name: worker
+ * description: Task execution specialist...
+ * disable-model-invocation: false
+ * allowed-tools: Read, Write, Glob, Grep, Bash
  * ---
  *
  * # Agent Role
  *
  * Detailed behavior description here...
  * ```
+ *
+ * **Note**: Scout agent skill file is required for frontmatter only,
+ * as its prompt template is defined in `prompt-builder.ts`.
  */
 
 import * as fs from 'fs/promises';

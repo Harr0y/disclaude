@@ -284,6 +284,10 @@ export async function send_file_to_feishu(params: {
   fileSize?: number;
   sizeMB?: string;
   error?: string;
+  feishuCode?: string | number;
+  feishuMsg?: string;
+  feishuLogId?: string;
+  troubleshooterUrl?: string;
 }> {
   const { filePath, chatId } = params;
 
