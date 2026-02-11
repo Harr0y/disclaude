@@ -40,7 +40,6 @@ export const ALLOWED_TOOLS = [
   'NotebookEdit',
 
   // User Interaction
-  'AskUserQuestion',
   'TodoWrite',
 ] as const;
 
