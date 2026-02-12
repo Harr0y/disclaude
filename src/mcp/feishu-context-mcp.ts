@@ -216,14 +216,29 @@ export async function send_user_feedback(params: {
     } else {
       // Card format: validate before sending
       if (typeof content === 'object' && isValidFeishuCard(content)) {
-        // Valid card - send as-is
+        // Valid card object - send as-is
         await sendMessageToFeishu(client, chatId, 'interactive', JSON.stringify(content));
         logger.debug({ chatId, hasValidStructure: true }, 'User card sent (interactive)');
       } else if (typeof content === 'string') {
-        // String content - convert to valid markdown card
-        const card = buildMarkdownCard(content);
-        await sendMessageToFeishu(client, chatId, 'interactive', JSON.stringify(card));
-        logger.debug({ chatId, contentLength: content.length }, 'User markdown card sent (converted)');
+        // String content - check if it's a JSON-encoded card
+        try {
+          const parsed = JSON.parse(content);
+          if (isValidFeishuCard(parsed)) {
+            // Valid JSON card string - send directly
+            await sendMessageToFeishu(client, chatId, 'interactive', content);
+            logger.debug({ chatId, wasJsonString: true }, 'User card sent (from JSON string)');
+          } else {
+            // Valid JSON but not a card - treat as markdown text
+            const card = buildMarkdownCard(content);
+            await sendMessageToFeishu(client, chatId, 'interactive', JSON.stringify(card));
+            logger.debug({ chatId, contentLength: content.length }, 'User markdown card sent (JSON but not card)');
+          }
+        } catch {
+          // Not valid JSON - treat as plain markdown text
+          const card = buildMarkdownCard(content);
+          await sendMessageToFeishu(client, chatId, 'interactive', JSON.stringify(card));
+          logger.debug({ chatId, contentLength: content.length }, 'User markdown card sent (converted)');
+        }
       } else {
         // Invalid object - fallback to text message
         const fallbackText = JSON.stringify(content, null, 2);

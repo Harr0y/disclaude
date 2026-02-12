@@ -36,18 +36,34 @@ export function buildScoutPrompt(
     return userPrompt;
   }
 
-  // Use direct template (defined below)
-  const promptTemplate = getDirectTemplate();
+  // Use format() for robust placeholder replacement
+  // format() replaces all occurrences of each placeholder
+  return format(getDirectTemplate(), {
+    messageId: taskContext.messageId,
+    taskPath: taskContext.taskPath,
+    chatId: taskContext.chatId,
+    userId: taskContext.userId || 'N/A',
+    userPrompt,
+  });
+}
 
-  // Replace placeholders in the template
-  const prompt = promptTemplate
-    .replace('{messageId}', taskContext.messageId)
-    .replace('{taskPath}', taskContext.taskPath)
-    .replace('{chatId}', taskContext.chatId)
-    .replace('{userId (if available)}', taskContext.userId || 'N/A')
-    .replace('{userPrompt}', userPrompt);
-
-  return prompt;
+/**
+ * Format a template string with named placeholders.
+ *
+ * Replaces all occurrences of `{placeholderName}` with corresponding values.
+ * This is more robust than chained .replace() calls which only replace the first match.
+ *
+ * @param template - Template string with {placeholder} syntax
+ * @param values - Object mapping placeholder names to values
+ * @returns Formatted string with all placeholders replaced
+ */
+function format(template: string, values: Record<string, string>): string {
+  let result = template;
+  for (const [key, value] of Object.entries(values)) {
+    // Use split/join to replace ALL occurrences (more compatible than replaceAll)
+    result = result.split(`{${key}}`).join(value);
+  }
+  return result;
 }
 
 /**
@@ -64,7 +80,7 @@ function getDirectTemplate(): string {
 - **Message ID**: {messageId}
 - **Task Path**: {taskPath}
 - **Chat ID**: {chatId}
-- **User ID**: {userId (if available)}
+- **User ID**: {userId}
 
 ---
 
