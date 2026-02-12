@@ -15,7 +15,6 @@ import { Pilot } from '../pilot/index.js';
 import { FileHandler } from './file-handler.js';
 import { MessageSender } from './message-sender.js';
 import { TaskFlowOrchestrator } from './task-flow-orchestrator.js';
-import { handleGreeting } from '../agents/greeting-executor.js';
 
 /**
  * Feishu/Lark bot using WebSocket.
@@ -520,14 +519,6 @@ ${uploadPrompt}`;
       message_type,
       create_time
     );
-
-    // Check for greeting messages - provide friendly introduction
-    const greetingResponse = handleGreeting(text);
-    if (greetingResponse) {
-      this.logger.info({ chatId: chat_id }, 'Greeting detected, sending welcome message');
-      await this.sendMessage(chat_id, greetingResponse);
-      return;
-    }
 
     // Check for /task command (all other commands go to Pilot)
     if (text.trim().startsWith('/task ')) {
