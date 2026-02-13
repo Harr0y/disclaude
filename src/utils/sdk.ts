@@ -24,6 +24,8 @@ export interface CreateAgentSdkOptionsParams {
   cwd?: string;
   /** Permission mode for tool execution */
   permissionMode?: 'default' | 'bypassPermissions';
+  /** List of tool names to disable */
+  disallowedTools?: string[];
 }
 
 /**
@@ -49,6 +51,7 @@ export function createAgentSdkOptions(params: CreateAgentSdkOptionsParams): Reco
     apiBaseUrl,
     cwd = Config.getWorkspaceDir(),
     permissionMode = 'bypassPermissions',
+    disallowedTools,
   } = params;
 
   // Get node bin directory for PATH - needed for SDK subprocess spawning
@@ -66,6 +69,11 @@ export function createAgentSdkOptions(params: CreateAgentSdkOptionsParams): Reco
     // Individual agents (like Executor) configure MCP servers via
     // getSkillMcpServers() in skill-loader.ts.
   };
+
+  // Add disallowed tools if specified
+  if (disallowedTools && disallowedTools.length > 0) {
+    sdkOptions.disallowedTools = disallowedTools;
+  }
 
   // Set environment variables
   sdkOptions.env = {

@@ -11,7 +11,7 @@
  * - Command processing (/task)
  * - Direct chat mode
  * - File message handling (image, file, media)
- * - Task flow (Scout → Task.md → DialogueOrchestrator)
+ * - Task flow (Pilot with task skill → Task.md → DialogueOrchestrator)
  * - Error handling
  */
 
@@ -24,7 +24,7 @@ import { Pilot } from '../pilot/index.js';
 import { messageHistoryManager } from './message-history.js';
 import { attachmentManager } from './attachment-manager.js';
 import * as fs from 'fs/promises';
-import { Scout, DialogueOrchestrator } from '../task/index.js';
+import { DialogueOrchestrator } from '../task/index.js';
 
 // Mock dependencies
 vi.mock('@larksuiteoapi/node-sdk', () => {
@@ -109,7 +109,6 @@ vi.mock('./file-downloader.js', () => ({
 }));
 
 vi.mock('../task/index.js', () => ({
-  Scout: vi.fn(),
   DialogueOrchestrator: vi.fn(),
   extractText: vi.fn((msg) => msg.content || ''),
 }));
@@ -151,7 +150,6 @@ describe('FeishuBot', () => {
   let mockTaskTrackerInstance: any;
 //   let mockLongTaskTrackerInstance: any;
   let mockPilotInstance: any;
-  let mockScoutInstance: any;
   let mockDialogueOrchestratorInstance: any;
 
   const mockedLarkClient = lark.Client as unknown as ReturnType<typeof vi.fn>;
@@ -160,7 +158,6 @@ describe('FeishuBot', () => {
   const mockedTaskTracker = TaskTracker as unknown as ReturnType<typeof vi.fn>;
 //   const mockedLongTaskTracker = LongTaskTracker as unknown as ReturnType<typeof vi.fn>;
   const mockedPilot = Pilot as unknown as ReturnType<typeof vi.fn>;
-  const mockedScout = Scout as unknown as ReturnType<typeof vi.fn>;
   const mockedDialogueOrchestrator = DialogueOrchestrator as unknown as ReturnType<typeof vi.fn>;
 
   beforeEach(() => {
@@ -199,8 +196,8 @@ describe('FeishuBot', () => {
       enqueueMessage: vi.fn().mockResolvedValue(undefined),
     };
 
-    // Mock Scout instance
-    mockScoutInstance = {
+    // Scout removed - Pilot handles task skill directly
+    mockPilotInstance = {
       initialize: vi.fn().mockResolvedValue(undefined),
       setTaskContext: vi.fn(),
       queryStream: vi.fn().mockResolvedValue(undefined),
@@ -221,7 +218,6 @@ describe('FeishuBot', () => {
     mockedEventDispatcher.mockReturnValue(mockEventDispatcherInstance);
     mockedTaskTracker.mockReturnValue(mockTaskTrackerInstance);
     mockedPilot.mockReturnValue(mockPilotInstance);
-    mockedScout.mockReturnValue(mockScoutInstance);
     mockedDialogueOrchestrator.mockReturnValue(mockDialogueOrchestratorInstance);
 
     // Mock message history manager

@@ -14,9 +14,9 @@ import * as TaskModule from './index.js';
 
 describe('Task Module Exports', () => {
   describe('Core Agents', () => {
-    it('should export Scout', () => {
-      expect(TaskModule.Scout).toBeDefined();
-      expect(typeof TaskModule.Scout).toBe('function');
+    it('should export Evaluator', () => {
+      expect(TaskModule.Evaluator).toBeDefined();
+      expect(typeof TaskModule.Evaluator).toBe('function');
     });
 
     it('should export Evaluator', () => {
@@ -111,7 +111,7 @@ describe('Task Module Exports', () => {
       const exports = Object.keys(TaskModule);
 
       // Core agents
-      expect(exports).toContain('Scout');
+      // Scout removed - no longer exported
       expect(exports).toContain('Evaluator');
 
       // Bridges

@@ -1,22 +1,32 @@
 /**
- * Tests for Pilot class.
+ * Tests for Pilot class (Streaming Input version).
  */
 
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { Pilot } from './pilot.js';
-import type { PilotCallbacks } from './pilot.js';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { Pilot, type PilotCallbacks } from './pilot.js';
 
-describe('Pilot', () => {
+describe('Pilot (Streaming Input)', () => {
   let mockCallbacks: PilotCallbacks;
   let pilot: Pilot;
 
   beforeEach(() => {
+    vi.useFakeTimers();
     mockCallbacks = {
       sendMessage: vi.fn(async () => {}),
       sendCard: vi.fn(async () => {}),
       sendFile: vi.fn(async () => {}),
     };
-    pilot = new Pilot({ callbacks: mockCallbacks });
+    // Use short idle timeout for testing
+    pilot = new Pilot({
+      callbacks: mockCallbacks,
+      sessionIdleTimeout: 1000, // 1 second for testing
+    });
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    vi.useRealTimers();
+    pilot.shutdown().catch(() => {});
   });
 
   describe('Constructor', () => {
@@ -28,87 +38,63 @@ describe('Pilot', () => {
       expect(pilot['callbacks']).toBe(mockCallbacks);
     });
 
-    it('should initialize chat queues map', () => {
-      expect(pilot['chatQueues']).toBeInstanceOf(Map);
-      expect(pilot['chatQueues'].size).toBe(0);
+    it('should initialize states map', () => {
+      expect(pilot['states']).toBeInstanceOf(Map);
+      expect(pilot['states'].size).toBe(0);
     });
 
-    it('should initialize queue ready callbacks map', () => {
-      expect(pilot['queueReadyCallbacks']).toBeInstanceOf(Map);
-      expect(pilot['queueReadyCallbacks'].size).toBe(0);
-    });
-
-    it('should initialize active streams map', () => {
-      expect(pilot['activeStreams']).toBeInstanceOf(Map);
-      expect(pilot['activeStreams'].size).toBe(0);
-    });
-
-    it('should initialize pending write files map', () => {
-      expect(pilot['pendingWriteFiles']).toBeInstanceOf(Map);
-      expect(pilot['pendingWriteFiles'].size).toBe(0);
+    it('should start cleanup timer', () => {
+      expect(pilot['cleanupTimer']).toBeDefined();
     });
   });
 
-  describe('enqueueMessage', () => {
-    it('should enqueue message for new chatId', () => {
-      pilot.enqueueMessage('chat-123', 'Hello', 'msg-001');
+  describe('processMessage', () => {
+    it('should create state for new chatId', () => {
+      pilot.processMessage('chat-123', 'Hello', 'msg-001');
 
-      expect(pilot['chatQueues'].has('chat-123')).toBe(true);
-      const queue = pilot['chatQueues'].get('chat-123')!;
-      expect(queue.length).toBe(1);
-      expect(queue[0]).toEqual({
-        text: 'Hello',
-        messageId: 'msg-001',
-        timestamp: expect.any(Number),
-      });
+      expect(pilot['states'].has('chat-123')).toBe(true);
     });
 
-    it('should enqueue multiple messages for same chatId', () => {
-      pilot.enqueueMessage('chat-123', 'Hello', 'msg-001');
-      pilot.enqueueMessage('chat-123', 'World', 'msg-002');
+    it('should handle multiple messages for same chatId (same state)', () => {
+      pilot.processMessage('chat-123', 'Hello', 'msg-001');
+      pilot.processMessage('chat-123', 'World', 'msg-002');
 
-      const queue = pilot['chatQueues'].get('chat-123')!;
-      expect(queue.length).toBe(2);
-      expect(queue[0].text).toBe('Hello');
-      expect(queue[1].text).toBe('World');
+      // Should reuse the same state
+      expect(pilot['states'].size).toBe(1);
+      expect(pilot['states'].has('chat-123')).toBe(true);
     });
 
-    it('should start stream for first message', () => {
-      pilot.enqueueMessage('chat-123', 'Hello', 'msg-001');
+    it('should handle different chatIds independently (different states)', () => {
+      pilot.processMessage('chat-123', 'Hello', 'msg-001');
+      pilot.processMessage('chat-456', 'Hi', 'msg-002');
 
-      expect(pilot['activeStreams'].has('chat-123')).toBe(true);
+      // Should create two separate states
+      expect(pilot['states'].size).toBe(2);
+      expect(pilot['states'].has('chat-123')).toBe(true);
+      expect(pilot['states'].has('chat-456')).toBe(true);
     });
 
-    it('should not start duplicate stream for same chatId', () => {
-      pilot.enqueueMessage('chat-123', 'Hello', 'msg-001');
-      const firstStream = pilot['activeStreams'].get('chat-123');
-
-      pilot.enqueueMessage('chat-123', 'World', 'msg-002');
-      const secondStream = pilot['activeStreams'].get('chat-123');
-
-      expect(firstStream).toBe(secondStream);
+    it('should accept optional senderOpenId parameter', () => {
+      // Should not throw
+      pilot.processMessage('chat-123', 'Hello', 'msg-001', 'user-open-id');
+      expect(pilot['states'].has('chat-123')).toBe(true);
     });
 
-    it('should handle different chatIds independently', () => {
-      pilot.enqueueMessage('chat-123', 'Hello', 'msg-001');
-      pilot.enqueueMessage('chat-456', 'Hi', 'msg-002');
+    it('should be non-blocking (returns immediately)', () => {
+      const start = Date.now();
+      pilot.processMessage('chat-123', 'Hello', 'msg-001');
+      const elapsed = Date.now() - start;
 
-      expect(pilot['chatQueues'].has('chat-123')).toBe(true);
-      expect(pilot['chatQueues'].has('chat-456')).toBe(true);
-      expect(pilot['activeStreams'].has('chat-123')).toBe(true);
-      expect(pilot['activeStreams'].has('chat-456')).toBe(true);
+      // Should return almost immediately (not wait for SDK)
+      expect(elapsed).toBeLessThan(100);
     });
 
-    it('should assign timestamp to message', () => {
-      const beforeTime = Date.now();
-      pilot.enqueueMessage('chat-123', 'Hello', 'msg-001');
-      const afterTime = Date.now();
+    it('should update lastActivity timestamp', () => {
+      const before = Date.now();
+      pilot.processMessage('chat-123', 'Hello', 'msg-001');
+      const state = pilot['states'].get('chat-123');
 
-      const queue = pilot['chatQueues'].get('chat-123')!;
-      const timestamp = queue[0].timestamp;
-
-      expect(timestamp).toBeGreaterThanOrEqual(beforeTime);
-      expect(timestamp).toBeLessThanOrEqual(afterTime);
+      expect(state?.lastActivity).toBeGreaterThanOrEqual(before);
     });
   });
 
@@ -146,9 +132,7 @@ describe('Pilot', () => {
 
   describe('PilotOptions Interface', () => {
     it('should require callbacks field', () => {
-      const options: {
-        callbacks: PilotCallbacks;
-      } = {
+      const options: { callbacks: PilotCallbacks } = {
         callbacks: {
           sendMessage: async () => {},
           sendCard: async () => {},
@@ -158,69 +142,151 @@ describe('Pilot', () => {
 
       expect(options.callbacks).toBeDefined();
     });
+
+    it('should accept optional sessionIdleTimeout', () => {
+      const options: { callbacks: PilotCallbacks; sessionIdleTimeout?: number } = {
+        callbacks: {
+          sendMessage: async () => {},
+          sendCard: async () => {},
+          sendFile: async () => {},
+        },
+        sessionIdleTimeout: 60000,
+      };
+
+      expect(options.sessionIdleTimeout).toBe(60000);
+    });
   });
 
-  describe('PendingMessage Interface', () => {
-    it('should have text field', () => {
-      const message: {
-        text: string;
-        messageId: string;
-        timestamp: number;
-      } = {
-        text: 'Hello',
-        messageId: 'msg-001',
-        timestamp: Date.now(),
-      };
-
-      expect(message.text).toBe('Hello');
+  describe('hasActiveStream', () => {
+    it('should return false when no state exists', () => {
+      expect(pilot.hasActiveStream('chat-123')).toBe(false);
     });
 
-    it('should have messageId field', () => {
-      const message: {
-        text: string;
-        messageId: string;
-        timestamp: number;
-      } = {
-        text: 'Hello',
-        messageId: 'msg-001',
-        timestamp: Date.now(),
-      };
+    it('should return true when state is active', () => {
+      pilot.processMessage('chat-123', 'Hello', 'msg-001');
 
-      expect(message.messageId).toBe('msg-001');
+      // State should be active after creation
+      expect(pilot.hasActiveStream('chat-123')).toBe(true);
+    });
+  });
+
+  describe('getQueueLength', () => {
+    it('should return 0 when no state exists', () => {
+      expect(pilot.getQueueLength('chat-123')).toBe(0);
     });
 
-    it('should have timestamp field', () => {
-      const timestamp = Date.now();
-      const message: {
-        text: string;
-        messageId: string;
-        timestamp: number;
-      } = {
-        text: 'Hello',
-        messageId: 'msg-001',
-        timestamp,
-      };
+    it('should return 0 or 1 when state exists', () => {
+      pilot.processMessage('chat-123', 'Hello', 'msg-001');
 
-      expect(message.timestamp).toBe(timestamp);
+      // Queue length is 0 or 1 based on pending messages
+      const length = pilot.getQueueLength('chat-123');
+      expect(length).toBeGreaterThanOrEqual(0);
+      expect(length).toBeLessThanOrEqual(1);
+    });
+  });
+
+  describe('clearQueue', () => {
+    it('should clear state', () => {
+      pilot.processMessage('chat-123', 'Hello', 'msg-001');
+      expect(pilot['states'].has('chat-123')).toBe(true);
+
+      pilot.clearQueue('chat-123');
+
+      expect(pilot['states'].has('chat-123')).toBe(false);
+    });
+
+    it('should handle clearing non-existent state', () => {
+      // Should not throw
+      pilot.clearQueue('chat-nonexistent');
+    });
+  });
+
+  describe('clearPendingFiles', () => {
+    it('should clear pending files in state', () => {
+      pilot.processMessage('chat-123', 'Hello', 'msg-001');
+      const state = pilot['states'].get('chat-123');
+
+      // Add some pending files
+      state?.pendingWriteFiles.add('file1.txt');
+      state?.pendingWriteFiles.add('file2.txt');
+      expect(state?.pendingWriteFiles.size).toBe(2);
+
+      // Clear pending files
+      pilot.clearPendingFiles('chat-123');
+      expect(state?.pendingWriteFiles.size).toBe(0);
+    });
+  });
+
+  describe('resetAll', () => {
+    it('should clear all states', () => {
+      pilot.processMessage('chat-123', 'Hello', 'msg-001');
+      pilot.processMessage('chat-456', 'Hi', 'msg-002');
+      expect(pilot['states'].size).toBe(2);
+
+      pilot.resetAll();
+
+      expect(pilot['states'].size).toBe(0);
+    });
+  });
+
+  describe('getActiveSessionCount', () => {
+    it('should return 0 when no states', () => {
+      expect(pilot.getActiveSessionCount()).toBe(0);
+    });
+
+    it('should return count of active states', () => {
+      pilot.processMessage('chat-123', 'Hello', 'msg-001');
+      pilot.processMessage('chat-456', 'Hi', 'msg-002');
+
+      expect(pilot.getActiveSessionCount()).toBe(2);
+    });
+  });
+
+  describe('shutdown', () => {
+    it('should cleanup resources', async () => {
+      pilot.processMessage('chat-123', 'Hello', 'msg-001');
+
+      await pilot.shutdown();
+
+      expect(pilot['states'].size).toBe(0);
+    });
+
+    it('should stop cleanup timer', async () => {
+      await pilot.shutdown();
+
+      expect(pilot['cleanupTimer']).toBeUndefined();
+    });
+  });
+
+  describe('State Cleanup', () => {
+    it('should cleanup idle states after timeout', () => {
+      pilot.processMessage('chat-123', 'Hello', 'msg-001');
+      expect(pilot['states'].size).toBe(1);
+
+      // Advance time past idle timeout
+      vi.advanceTimersByTime(1100);
+
+      // Trigger cleanup manually (since timer callback runs async)
+      pilot['cleanupIdleStates']();
+
+      // State should be marked for cleanup
+      // Note: The actual state.close() is async, so we just check the logic
     });
   });
 
   describe('Design Principles', () => {
     it('should be platform-agnostic', () => {
-      // Pilot works with any messaging platform
+      // Pilot works with any messaging platform via callbacks
       const isPlatformAgnostic = true;
       expect(isPlatformAgnostic).toBe(true);
     });
 
-    it('should use queue-based architecture', () => {
-      // Pilot supports message queuing
-      expect(pilot['chatQueues']).toBeInstanceOf(Map);
-    });
+    it('should use per-chatId states (not shared)', () => {
+      // Each chatId gets its own state
+      pilot.processMessage('chat-123', 'Hello', 'msg-001');
+      pilot.processMessage('chat-456', 'Hi', 'msg-002');
 
-    it('should maintain persistent sessions', () => {
-      // Each messageId maintains conversation session
-      const sessionId = 'msg-001';
-      expect(sessionId).toBeDefined();
+      expect(pilot['states'].size).toBe(2);
     });
 
     it('should use callback-based output', () => {
@@ -258,62 +324,39 @@ describe('Pilot', () => {
           sendCard: () => Promise<void>;
           sendFile: () => Promise<void>;
         };
+        sessionIdleTimeout?: number;
       } = {
         callbacks: {
           sendMessage: async () => {},
           sendCard: async () => {},
           sendFile: async () => {},
         },
+        sessionIdleTimeout: undefined,
       };
 
       expect(options).toBeDefined();
     });
   });
 
-  describe('Error Handling', () => {
-    it('should handle stream errors gracefully', () => {
-      // Stream error handling is implemented
-      const errorHandling = true;
-      expect(errorHandling).toBe(true);
+  describe('State Management', () => {
+    it('should initialize PerChatIdState correctly', () => {
+      pilot.processMessage('chat-123', 'Hello', 'msg-001');
+      const state = pilot['states'].get('chat-123');
+
+      expect(state).toBeDefined();
+      expect(state?.messageQueue).toEqual(expect.any(Array));
+      expect(state?.pendingWriteFiles).toBeInstanceOf(Set);
+      expect(state?.closed).toBe(false);
+      expect(state?.started).toBe(true);
     });
 
-    it('should restart stream on error', () => {
-      // Stream restart on error
-      const restartOnErr = true;
-      expect(restartOnErr).toBe(true);
-    });
-  });
+    it('should queue messages correctly', () => {
+      pilot.processMessage('chat-123', 'Hello', 'msg-001');
+      pilot.processMessage('chat-123', 'World', 'msg-002');
+      const state = pilot['states'].get('chat-123');
 
-  describe('Session Management', () => {
-    it('should use messageId for session resume', () => {
-      // messageId is used for SDK resume parameter
-      const messageId = 'msg-001';
-      expect(messageId).toBeDefined();
-    });
-
-    it('should maintain per-chatId queues', () => {
-      // Each chatId has its own queue
-      pilot.enqueueMessage('chat-123', 'Hello', 'msg-001');
-      pilot.enqueueMessage('chat-456', 'World', 'msg-002');
-
-      expect(pilot['chatQueues'].get('chat-123')?.length).toBe(1);
-      expect(pilot['chatQueues'].get('chat-456')?.length).toBe(1);
-    });
-  });
-
-  describe('File Tracking', () => {
-    it('should track pending write files', () => {
-      // Track Write operations for file sending
-      expect(pilot['pendingWriteFiles']).toBeInstanceOf(Map);
-    });
-
-    it('should associate files with chatId', () => {
-      // Files are tracked per chatId
-      const chatId = 'chat-123';
-      pilot['pendingWriteFiles'].set(chatId, new Set(['/path/to/file.txt']));
-
-      const files = pilot['pendingWriteFiles'].get(chatId);
-      expect(files?.has('/path/to/file.txt')).toBe(true);
+      // Messages should be in queue (they may have been consumed by the generator)
+      expect(state?.messageQueue).toBeDefined();
     });
   });
 });

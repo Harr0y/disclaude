@@ -2,7 +2,7 @@
   "name": "disclaude",
   "version": "0.2.3",
   "description": "Multi-platform agent bot supporting Feishu/Lark and CLI",
-  "main": "dist/index.js",
+  "main": "dist/cli-entry.js",
   "type": "module",
   "bin": {
     "disclaude": "./dist/cli-entry.js"
@@ -13,9 +13,9 @@
     "package.json"
   ],
   "scripts": {
-    "dev": "tsx watch src/index.ts",
-    "start": "node dist/index.js",
-    "cli": "tsx src/index.ts",
+    "dev": "tsx watch src/cli-entry.ts",
+    "start": "node dist/cli-entry.js --help",
+    "cli": "tsx src/cli-entry.ts",
     "build": "tsup",
     "type-check": "tsc --noEmit",
     "lint": "eslint src",

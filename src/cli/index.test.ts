@@ -12,8 +12,7 @@ import * as cli from './index.js';
 
 // Mock dependencies
 vi.mock('../agent/index.js', () => ({
-  Scout: vi.fn(),
-  AgentDialogueBridge: vi.fn(),
+  DialogueOrchestrator: vi.fn(),
 }));
 
 vi.mock('../config/index.js', () => ({
@@ -132,20 +131,20 @@ describe('CLI Module', () => {
   });
 
   describe('Flow Structure', () => {
-    it('should implement Scout flow', () => {
-      // Flow 1: Scout creates Task.md
-      const flow1 = 'Scout creating Task.md';
-      expect(flow1).toContain('Scout');
+    it('should implement Pilot flow', () => {
+      // Flow: Pilot handles all messages
+      const flow1 = 'Pilot handles all messages';
+      expect(flow1).toContain('Pilot');
     });
 
     it('should implement Dialogue Bridge flow', () => {
-      // Flow 2: Create dialogue bridge
+      // Flow: Create dialogue bridge
       const flow2 = 'Create dialogue bridge';
       expect(flow2).toContain('dialogue bridge');
     });
 
     it('should handle message processing', () => {
-      // Flow 3: Process messages
+      // Flow: Process messages
       const flow3 = 'Process messages';
       expect(flow3).toContain('Process messages');
     });
@@ -154,7 +153,7 @@ describe('CLI Module', () => {
   describe('Error Handling', () => {
     it('should handle Task.md creation failure', () => {
       // Error handling for missing Task.md
-      const errorMsg = 'Scout failed to create Task.md';
+      const errorMsg = 'Pilot failed to create Task.md';
       expect(errorMsg).toContain('failed to create');
     });
 
@@ -213,13 +212,13 @@ describe('CLI Module', () => {
       expect(configMethod).toBe('getAgentConfig');
     });
 
-    it('should pass API key to Scout', () => {
+    it('should pass API key to Pilot', () => {
       // API key configuration
       const apiKeyConfig = 'apiKey';
       expect(apiKeyConfig).toBe('apiKey');
     });
 
-    it('should pass model to Scout', () => {
+    it('should pass model to Pilot', () => {
       // Model configuration
       const modelConfig = 'model';
       expect(modelConfig).toBe('model');
@@ -227,10 +226,10 @@ describe('CLI Module', () => {
   });
 
   describe('Dependencies', () => {
-    it('should import Scout from task module', () => {
-      // Scout import
-      const importPath = '../task/index.js';
-      expect(importPath).toContain('task');
+    it('should import Pilot from pilot module', () => {
+      // Pilot import
+      const importPath = '../pilot/index.js';
+      expect(importPath).toContain('pilot');
     });
 
     it('should import DialogueOrchestrator', () => {

@@ -1,16 +1,6 @@
 import { defineConfig } from 'tsup';
 
 export default defineConfig([
-  // Main entry point (for backward compatibility)
-  {
-    entry: ['src/index.ts'],
-    format: ['esm'],
-    target: 'node18',
-    clean: true,
-    sourcemap: true,
-    splitting: false,
-    minify: false,
-  },
   // CLI entry point (standalone executable)
   {
     entry: ['src/cli-entry.ts'],

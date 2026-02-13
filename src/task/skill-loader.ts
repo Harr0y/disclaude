@@ -8,12 +8,12 @@
  * - Skill content (when present) provides agent's system prompt (static behavior)
  * - Runtime prompts provide task-specific instructions (dynamic context)
  *
- * ## Special Case: Scout Agent
+ * ## Task Skill for Pilot
  *
- * **Scout agent uses a direct prompt template** defined in `prompt-builder.ts`:
- * - Scout's prompt structure is explicitly defined in code (not from skill files)
- * - The skill file for Scout is still required for frontmatter (allowed-tools, etc.)
- * - This ensures Scout's prompt template is stable and predictable
+ * **Task skill uses a direct prompt template**:
+ * - Task skill's prompt structure is explicitly defined in code (not from skill files)
+ * - The skill file is still required for frontmatter (allowed-tools, etc.)
+ * - This ensures the task skill's prompt template is stable and predictable
  *
  * ## Separation of Concerns
  *
@@ -30,8 +30,8 @@
  * - Iteration-specific directives
  * - Generated dynamically per request
  *
- * **Direct templates (prompt-builder.ts)**:
- * - Scout uses a direct template for its runtime prompt
+ * **Direct templates**:
+ * - Task skill uses a direct template for its runtime prompt
  * - Ensures stability and predictability of prompt structure
  *
  * ## Key Benefits
@@ -40,7 +40,7 @@
  * 2. **No Redundancy**: Runtime prompts don't repeat static behavior
  * 3. **Maintainability**: Change behavior in one place
  * 4. **Efficiency**: Smaller runtime prompts = less token usage
- * 5. **Stability**: Direct templates (like Scout's) won't change unexpectedly
+ * 5. **Stability**: Direct templates won't change unexpectedly
  *
  * ## File Format
  *
@@ -58,8 +58,8 @@
  * Detailed behavior description here...
  * ```
  *
- * **Note**: Scout agent skill file is required for frontmatter only,
- * as its prompt template is defined in `prompt-builder.ts`.
+ * **Note**: Task skill file is required for frontmatter only,
+ * as its prompt template is defined in code.
  */
 
 import * as fs from 'fs/promises';
@@ -176,7 +176,7 @@ function parseSkillFrontmatter(content: string): {
 /**
  * Load a skill file from .claude/skills directory.
  *
- * @param skillName - Name of the skill directory (e.g., "scout")
+ * @param skillName - Name of the skill directory (e.g., "task")
  * @returns Parsed skill data or error
  */
 export async function loadSkill(skillName: string): Promise<SkillLoadResult> {

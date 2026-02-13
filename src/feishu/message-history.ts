@@ -4,8 +4,8 @@
  * Tracks conversation history between users and the bot,
  * including both inbound (user) and outbound (bot) messages.
  *
- * This provides context for Scout to understand
- * the conversation flow before creating Task.md.
+ * This provides context for Pilot to understand
+ * the conversation flow during task execution.
  *
  * Storage: In-memory Map (lost on restart)
  * TODO: Consider persisting to Redis or database for production

@@ -2,16 +2,11 @@
  * CLI mode for Disclaude.
  * Executes a single prompt from command line arguments and exits.
  */
-
-import * as fs from 'fs/promises';
-import { Scout, DialogueOrchestrator } from '../task/index.js';
 import { Config } from '../config/index.js';
-import { CLIOutputAdapter, FeishuOutputAdapter } from '../utils/output-adapter.js';
-import { createFeishuSender, createFeishuCardSender } from '../feishu/sender.js';
+import { CLIOutputAdapter } from '../utils/output-adapter.js';
 import { createLogger } from '../utils/logger.js';
 import { handleError, ErrorCategory } from '../utils/error-handler.js';
-import { extractText } from '../utils/sdk.js';
-import { TaskTracker } from '../utils/task-tracker.js';
+import { Pilot } from '../pilot/index.js';
 
 const logger = createLogger('CLI');
 
@@ -40,76 +35,31 @@ function color(text: string, colorName: keyof typeof colors): string {
 /**
  * Execute a single prompt and exit.
  * @param prompt - The user prompt to execute
- * @param agentConfig - Agent configuration
  * @param feishuChatId - Optional Feishu chat ID to send output to (instead of console)
  */
 async function executeOnce(
   prompt: string,
-  agentConfig: ReturnType<typeof Config.getAgentConfig>,
   feishuChatId?: string
 ): Promise<void> {
   // Create unique messageId for CLI session
   const messageId = `cli-${Date.now()}`;
   const chatId = feishuChatId || 'cli-console';
-  const taskTracker = new TaskTracker();
-
-  // === FLOW 1: Scout creates Task.md ===
-  const taskPath = taskTracker.getDialogueTaskPath(messageId);
-
-  const scout = new Scout({
-    skillName: 'scout',
-  });
-
-  // Set context for Task.md creation
-  // Use system username for CLI mode, fallback to 'cli-user'
-  const userId = process.env.USER || process.env.USERNAME || 'cli-user';
-
-  scout.setTaskContext({
-    chatId,
-    userId,
-    messageId,
-    taskPath,
-  });
-
-  // Run Scout to create Task.md
-  logger.info({ messageId, taskPath }, 'Flow 1: Scout creating Task.md');
-  for await (const msg of scout.queryStream(prompt)) {
-    logger.debug({ content: msg.content }, 'Scout output');
-  }
-
-  // Verify Task.md was created
-  try {
-    await fs.access(taskPath);
-  } catch {
-    throw new Error(
-      `Scout failed to create Task.md at ${taskPath}. ` +
-        'The model may not have called the Write tool. ' +
-        'Please check if the model supports tool calling properly.'
-    );
-  }
-
-  logger.info({ taskPath }, 'Task.md created by Scout');
-
-  // === FLOW 2: Create dialogue bridge ===
-  // The bridge will create fresh Evaluator/Executor instances per iteration
-  const bridge = new DialogueOrchestrator({
-    evaluatorConfig: {
-      apiKey: agentConfig.apiKey,
-      model: agentConfig.model,
-      apiBaseUrl: agentConfig.apiBaseUrl,
-      permissionMode: 'bypassPermissions',
-    },
-  });
 
   // Create output adapter
-  let adapter: CLIOutputAdapter | FeishuOutputAdapter;
+  let adapter: CLIOutputAdapter;
 
   if (feishuChatId) {
-    const sendToFeishu = createFeishuSender();
-    const sendCardToFeishu = createFeishuCardSender();
+    // Feishu mode: Use FeishuOutputAdapter
+    const { FeishuOutputAdapter } = await import('../utils/output-adapter.js');
+    const { createFeishuSender, createFeishuCardSender } = await import('../feishu/sender.js');
+
     adapter = new FeishuOutputAdapter({
-      sendMessage: sendToFeishu,
-      sendCard: sendCardToFeishu,
+      sendMessage: async (msg: string) => {
+        await createFeishuSender(feishuChatId, msg);
+      },
+      sendCard: async (card: Record<string, unknown>) => {
+        await createFeishuCardSender(feishuChatId, card);
+      },
       chatId: feishuChatId,
       throttleIntervalMs: 2000,
     });
@@ -118,34 +68,49 @@ async function executeOnce(
     adapter = new CLIOutputAdapter();
   }
 
+  // Create Pilot instance
+  const pilot = new Pilot({
+    callbacks: {
+      sendMessage: async (msg: string) => {
+        adapter.write(msg);
+      },
+      sendCard: async (card: Record<string, unknown>) => {
+        const cardJson = JSON.stringify(card, null, 2);
+        adapter.write(cardJson);
+      },
+      sendFile: async (filePath: string) => {
+        adapter.write(`\n📎 File created: ${filePath}\n`);
+      },
+    },
+  });
+
   try {
-    // Run dialogue loop (Flow 2)
-    for await (const message of bridge.runDialogue(
-      taskPath,
-      prompt,
-      chatId,
-      messageId
-    )) {
-      const content = typeof message.content === 'string'
-        ? message.content
-        : extractText(message);
+    // Process message through Pilot
+    await pilot.processMessage(chatId, prompt, messageId);
 
-      if (!content) {
-        continue;
-      }
-
-      // Use adapter to write message
-      await adapter.write(content, message.messageType ?? 'text');
-    }
-
-  } finally {
-    // Ensure final cleanup
+    // Wait for output to complete
     if ('finalize' in adapter) {
-      (adapter as CLIOutputAdapter).finalize();
+      (adapter as any).finalize();
     }
     if ('clearThrottleState' in adapter) {
-      (adapter as FeishuOutputAdapter).clearThrottleState();
+      (adapter as any).clearThrottleState();
     }
+
+    logger.info('CLI execution complete');
+  } catch (error) {
+    const enriched = handleError(error, {
+      category: ErrorCategory.SDK,
+      feishuChatId,
+      userMessage: 'CLI execution failed. Please check your prompt and try again.'
+    }, {
+      log: true,
+      customLogger: logger
+    });
+
+    console.log('');
+    console.log(color(`Error: ${enriched.userMessage || enriched.message}`, 'red'));
+    console.log('');
+    process.exit(1);
   }
 }
 
@@ -160,7 +125,7 @@ export async function runCli(args: string[]): Promise<void> {
     : args.join(' '); // Fallback to direct argument
 
   // Parse --feishu-chat-id argument (optional)
-  // Only use this parameter to enable Feishu mode, not the environment variable
+  // Only use this parameter to enable Feishu mode, not environment variable
   const feishuChatIdIndex = args.indexOf('--feishu-chat-id');
   let feishuChatId = feishuChatIdIndex !== -1 && args[feishuChatIdIndex + 1]
     ? args[feishuChatIdIndex + 1]
@@ -185,17 +150,17 @@ export async function runCli(args: string[]): Promise<void> {
   // Show usage if no prompt provided
   if (!prompt || prompt.trim() === '' || prompt === '--prompt') {
     console.log('');
-    console.log(color('═══════════════════════════════════════════════════', 'cyan'));
+    console.log(color('═══════════════════════════════════════════════════════', 'cyan'));
     console.log(color('  Disclaude - CLI Mode', 'bold'));
-    console.log(color('═══════════════════════════════════════════════════', 'cyan'));
+    console.log(color('═════════════════════════════════════════════════════════', 'cyan'));
     console.log('');
     console.log(color('Usage:', 'bold'));
-    console.log(`  node dist/index.js --prompt ${color('"your prompt here"', 'yellow')}`);
-    console.log(`  npm start -- --prompt ${color('"your prompt here"', 'yellow')}`);
+    console.log(`  node dist/index.js --prompt ${color('<your prompt here>', 'yellow')}`);
+    console.log(`  npm start -- --prompt ${color('<your prompt here>', 'yellow')}`);
     console.log('');
     console.log(color('Options:', 'bold'));
     console.log(`  --feishu-chat-id ${color('<chat_id|auto>', 'yellow')}  Send output to Feishu chat`);
-    console.log(`                         ${color('auto', 'cyan')} = use FEISHU_CLI_CHAT_ID env var`);
+    console.log(`                         ${color('auto', 'cyan')} = Use FEISHU_CLI_CHAT_ID env var`);
     console.log('');
     console.log(color('Environment Variables:', 'bold'));
     console.log('  FEISHU_CLI_CHAT_ID    Chat ID used when --feishu-chat-id auto is specified');
@@ -203,19 +168,15 @@ export async function runCli(args: string[]): Promise<void> {
     console.log(color('Example:', 'bold'));
     console.log(`  npm start -- --prompt ${color('"Create a hello world file"', 'yellow')}`);
     console.log(`  npm start -- --prompt ${color('"Analyze code"', 'yellow')} --feishu-chat-id ${color('oc_xxx', 'yellow')}`);
-    console.log(`  npm start -- --prompt ${color('"test"', 'yellow')} --feishu-chat-id ${color('auto', 'yellow')}`);
     console.log('');
-    process.exit(1);
+    process.exit(0);
   }
-
-  // Get agent configuration
-  const agentConfig = Config.getAgentConfig();
 
   // Display prompt info (only in console mode)
   if (!feishuChatId) {
     console.log('');
     console.log(color('Prompt:', 'bold'), prompt);
-    console.log(color('───────────────────────────────────────────────────', 'dim'));
+    console.log(color('───────────────────────────────────', 'dim'));
     console.log('');
   } else {
     // Show chat_id source
@@ -229,7 +190,7 @@ export async function runCli(args: string[]): Promise<void> {
   }
 
   try {
-    await executeOnce(prompt, agentConfig, feishuChatId);
+    await executeOnce(prompt, feishuChatId);
   } catch (error) {
     const enriched = handleError(error, {
       category: ErrorCategory.SDK,

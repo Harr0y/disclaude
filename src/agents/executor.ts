@@ -3,7 +3,8 @@
  *
  * Simplified architecture:
  * - No subtask concept
- * - Direct task execution based on Evaluator feedback
+ * - Direct task execution based on Evaluator's evaluation.md
+ * - Outputs execution.md and optionally final_result.md
  * - Yields progress events for real-time reporting
  * - Uses Config for unified configuration
  */
@@ -14,6 +15,7 @@ import type { ParsedSDKMessage } from '../types/agent.js';
 import { Config } from '../config/index.js';
 import { createLogger } from '../utils/logger.js';
 import { AgentExecutionError, TimeoutError, formatError } from '../utils/errors.js';
+import { TaskFileManager } from '../task/file-manager.js';
 
 /**
  * Executor configuration.
@@ -66,6 +68,10 @@ export interface TaskResult {
  *
  * Yields progress events during execution without handling user communication.
  * All reporting is delegated to the Reporter via the IterationBridge layer.
+ *
+ * Output files:
+ * - execution.md: Created in each iteration directory
+ * - final_result.md: Created when task is complete
  */
 export class Executor {
   private readonly apiKey: string;
@@ -74,6 +80,7 @@ export class Executor {
   private readonly provider: 'anthropic' | 'glm';
   private logger: ReturnType<typeof createLogger>;
   private readonly config: ExecutorConfig;
+  private fileManager: TaskFileManager;
 
   constructor(config: ExecutorConfig) {
     this.config = config;
@@ -85,6 +92,7 @@ export class Executor {
     this.model = agentConfig.model;
     this.apiBaseUrl = agentConfig.apiBaseUrl;
     this.provider = agentConfig.provider;
+    this.fileManager = new TaskFileManager();
 
     // Create logger
     this.logger = createLogger('Executor', { model: this.model });
@@ -98,6 +106,8 @@ export class Executor {
   /**
    * Execute a task with a fresh agent.
    *
+   * Reads evaluation.md for guidance and creates execution.md + final_result.md.
+   *
    * Yields progress events during execution:
    * - 'start': When the task begins
    * - 'output': For each message from the agent
@@ -107,11 +117,9 @@ export class Executor {
    * Returns the final TaskResult when complete.
    */
   async *executeTask(
-    taskInstructions: string,
-    workspaceDir: string,
-    taskId?: string,
-    iteration?: number,
-    previousOutput?: string
+    taskId: string,
+    iteration: number,
+    workspaceDir: string
   ): AsyncGenerator<TaskProgressEvent, TaskResult> {
     // Check for cancellation
     if (this.config?.abortSignal?.aborted) {
@@ -126,8 +134,16 @@ export class Executor {
       title: 'Execute Task',
     };
 
+    // Read evaluation.md for guidance
+    let evaluationContent = '';
+    try {
+      evaluationContent = await this.fileManager.readEvaluation(taskId, iteration);
+    } catch {
+      this.logger.warn({ taskId, iteration }, 'No evaluation.md found, proceeding without guidance');
+    }
+
     // Build the task execution prompt
-    const prompt = this.buildTaskPrompt(taskInstructions, previousOutput);
+    const prompt = this.buildTaskPrompt(taskId, iteration, evaluationContent);
 
     // Log execution start
     this.logger.debug({
@@ -135,7 +151,7 @@ export class Executor {
       taskId,
       iteration,
       promptLength: prompt.length,
-      previousOutputLength: previousOutput?.length || 0,
+      evaluationLength: evaluationContent.length,
     }, 'Starting task execution');
 
     // Prepare SDK options
@@ -216,23 +232,26 @@ export class Executor {
         }
       }
 
-      // Create summary file
-      const summaryFile = await this.createSummary(workspaceDir, taskInstructions, output, error);
+      // Create execution.md in iteration directory
+      await this.createExecutionFile(taskId, iteration, output, error);
 
       // Find all created files
       const files = await this.findCreatedFiles(workspaceDir);
 
+      // Check if final_result.md was created by the agent
+      // (used for logging, actual completion check is in IterationBridge)
+
       // Yield complete event
       yield {
         type: 'complete',
-        summaryFile,
+        summaryFile: this.fileManager.getExecutionPath(taskId, iteration),
         files,
       };
 
       // Return result
       return {
         success: !error,
-        summaryFile,
+        summaryFile: this.fileManager.getExecutionPath(taskId, iteration),
         files,
         output,
         error,
@@ -262,6 +281,13 @@ export class Executor {
         this.logger.error({ err: formatError(agentError) }, 'Task execution failed');
       }
 
+      // Create execution.md even on error
+      try {
+        await this.createExecutionFile(taskId, iteration, output, error);
+      } catch (writeError) {
+        this.logger.error({ err: writeError }, 'Failed to write execution.md');
+      }
+
       yield {
         type: 'error',
         error,
@@ -269,7 +295,7 @@ export class Executor {
 
       return {
         success: false,
-        summaryFile: '',
+        summaryFile: this.fileManager.getExecutionPath(taskId, iteration),
         files: [],
         output,
         error,
@@ -280,74 +306,98 @@ export class Executor {
   /**
    * Build task execution prompt.
    */
-  private buildTaskPrompt(taskInstructions: string, previousOutput?: string): string {
+  private buildTaskPrompt(taskId: string, iteration: number, evaluationContent: string): string {
+    const taskMdPath = this.fileManager.getTaskSpecPath(taskId);
+    const executionPath = this.fileManager.getExecutionPath(taskId, iteration);
+    const finalResultPath = this.fileManager.getFinalResultPath(taskId);
+
     const parts: string[] = [];
 
     parts.push('# Task Execution');
     parts.push('');
-    parts.push('You are executing a task. Carefully read the instructions and complete the work.');
+    parts.push(`Task ID: ${taskId}`);
+    parts.push(`Iteration: ${iteration}`);
     parts.push('');
 
-    if (previousOutput) {
-      parts.push('## Previous Work');
+    // Add evaluation guidance if available
+    if (evaluationContent) {
+      parts.push('## Evaluation Guidance');
       parts.push('');
-      parts.push('In the previous iteration, the following was accomplished:');
+      parts.push('The Evaluator has assessed the task. Here is the evaluation:');
       parts.push('');
-      parts.push(previousOutput);
+      parts.push('```');
+      parts.push(evaluationContent);
+      parts.push('```');
       parts.push('');
       parts.push('---');
       parts.push('');
     }
 
-    parts.push('## Task Instructions');
+    parts.push('## Your Job');
     parts.push('');
-    parts.push(taskInstructions);
+    parts.push(`1. Read the task specification: \`${taskMdPath}\``);
+    parts.push('2. Execute the task based on the requirements and evaluation guidance');
+    parts.push('3. When complete, create the following files:');
+    parts.push('');
+    parts.push(`**Required**: \`${executionPath}\``);
+    parts.push('```markdown');
+    parts.push('# Execution: Iteration ' + iteration);
+    parts.push('');
+    parts.push('## Summary');
+    parts.push('(What you did)');
+    parts.push('');
+    parts.push('## Changes Made');
+    parts.push('- Change 1');
+    parts.push('- Change 2');
+    parts.push('');
+    parts.push('## Files Modified');
+    parts.push('- file1.ts');
+    parts.push('- file2.ts');
+    parts.push('```');
+    parts.push('');
+    parts.push(`**If task is complete**: \`${finalResultPath}\``);
+    parts.push('```markdown');
+    parts.push('# Final Result');
+    parts.push('');
+    parts.push('Task completed successfully.');
+    parts.push('');
+    parts.push('## Deliverables');
+    parts.push('- Deliverable 1');
+    parts.push('- Deliverable 2');
+    parts.push('```');
     parts.push('');
     parts.push('---');
     parts.push('');
     parts.push('**Start executing the task now.**');
-    parts.push('');
-    parts.push('**Remember to create a summary.md file documenting your work when you complete.**');
 
     return parts.join('\n');
   }
 
   /**
-   * Create summary file in workspace.
+   * Create execution.md file.
    */
-  private async createSummary(
-    workspaceDir: string,
-    taskInstructions: string,
+  private async createExecutionFile(
+    taskId: string,
+    iteration: number,
     output: string,
     error?: string
-  ): Promise<string> {
-    const summaryPath = `${workspaceDir}/summary.md`;
+  ): Promise<void> {
     const timestamp = new Date().toISOString();
 
-    const summary = `# Task Execution Summary
+    const content = `# Execution: Iteration ${iteration}
 
 **Timestamp**: ${timestamp}
 **Status**: ${error ? 'Failed' : 'Completed'}
 
-## Task Instructions
-
-${taskInstructions}
-
 ## Execution Output
 
-${output}
+${output || '(No output)'}
 
 ${error ? `## Error\n\n${error}\n` : ''}
-
-## Files Created
-
-See task directory for created files.
 `;
 
-    await fs.writeFile(summaryPath, summary, 'utf-8');
-    this.logger.debug({ summaryPath }, 'Summary file created');
-
-    return summaryPath;
+    await this.fileManager.writeExecution(taskId, iteration, content);
+    this.logger.debug({ taskId, iteration }, 'Execution file created');
   }
 
   /**

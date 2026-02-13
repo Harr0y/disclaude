@@ -64,12 +64,6 @@ export interface AgentOptions {
   bypassPermissions?: boolean;
 }
 
-// Session info for resuming conversations
-export interface SessionInfo {
-  sessionId?: string;
-  resume?: string;
-}
-
 /**
  * Union type for agent input supporting both string prompts and streaming message arrays.
  * This enables Streaming Input Mode for multi-turn conversation support.

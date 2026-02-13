@@ -1,20 +1,18 @@
 /**
- * TaskFlowOrchestrator - Manages the complete task flow for Scout → Dialogue execution.
+ * TaskFlowOrchestrator - Manages dialogue execution phase.
  *
- * This module orchestrates:
- * - Flow 1: Scout creates Task.md
- * - Flow 2: DialogueOrchestrator executes the task
+ * This module handles:
+ * - DialogueOrchestrator execution (Evaluator → Executor → Reporter)
+ * - Output adapters for Feishu integration
+ * - Message tracking and cleanup
+ * - Error handling
  *
- * Responsibilities:
- * - Coordinate Scout and Dialogue agents
- * - Manage output adapters for Feishu integration
- * - Track message sending and completion
- * - Handle errors and cleanup
+ * The Task.md creation is handled by Pilot with task skill.
+ * This orchestrator only manages the dialogue phase triggered by start_dialogue tool.
  */
 
-import * as fs from 'fs/promises';
 import * as path from 'path';
-import { Scout, DialogueOrchestrator, extractText } from '../task/index.js';
+import { DialogueOrchestrator, extractText } from '../task/index.js';
 import { Config } from '../config/index.js';
 import { FeishuOutputAdapter } from '../utils/output-adapter.js';
 import type { TaskTracker } from '../utils/task-tracker.js';
@@ -40,6 +38,9 @@ export class TaskFlowOrchestrator {
   private messageCallbacks: MessageCallbacks;
   private logger: Logger;
 
+  // Track running background tasks for cleanup
+  private runningDialogueTasks: Map<string, Promise<unknown>> = new Map();
+
   constructor(
     taskTracker: TaskTracker,
     messageCallbacks: MessageCallbacks,
@@ -51,88 +52,59 @@ export class TaskFlowOrchestrator {
   }
 
   /**
-   * Execute the complete task flow: Scout → Dialogue
+   * Execute dialogue phase for a task.
    *
-   * @param context - Task execution context
-   * @returns Accumulated response content
+   * This is called by the start_dialogue tool after Pilot creates Task.md.
+   *
+   * @param chatId - Feishu chat ID
+   * @param messageId - Unique message identifier
+   * @param text - Original user request
+   * @returns Promise that resolves when dialogue completes
    */
-  async execute(context: TaskFlowContext): Promise<string> {
-    const { chatId, messageId, text, sender } = context;
+  async executeDialoguePhase(
+    chatId: string,
+    messageId: string,
+    text: string
+  ): Promise<void> {
+    const taskPath = this.taskTracker.getDialogueTaskPath(messageId);
     const agentConfig = Config.getAgentConfig();
 
-    // === FLOW 1: Scout creates Task.md ===
-    const taskPath = this.taskTracker.getDialogueTaskPath(messageId);
+    // Run dialogue asynchronously in background
+    const dialogueTask = this.runDialogue(chatId, messageId, text, taskPath, agentConfig)
+      .catch((error) => {
+        this.logger.error({ err: error, chatId, messageId }, 'Async dialogue failed');
+        // Send error notification to user
+        this.messageCallbacks.sendMessage(chatId, `❌ 后台任务执行失败: ${error instanceof Error ? error.message : String(error)}`)
+          .catch((sendError) => {
+            this.logger.error({ err: sendError }, 'Failed to send error notification');
+          });
+      })
+      .finally(() => {
+        // Clean up tracking
+        this.runningDialogueTasks.delete(messageId);
+        this.logger.debug({ messageId }, 'Async dialogue task completed and cleaned up');
+      });
 
-    const scout = new Scout({
-      skillName: 'scout',
-    });
+    // Track the running task
+    this.runningDialogueTasks.set(messageId, dialogueTask);
 
-    // Set context for Task.md creation
-    // Extract open_id from sender_id object (Feishu event structure)
-    const senderOpenId = sender?.sender_id?.open_id;
-    scout.setTaskContext({
-      chatId,
-      userId: senderOpenId,
-      messageId,
-      taskPath,
-      conversationHistory: context.conversationHistory,
-    });
-
-    // Create output adapter for Scout phase
-    const scoutAdapter = new FeishuOutputAdapter({
-      sendMessage: async (id: string, msg: string) => {
-        await this.messageCallbacks.sendMessage(id, msg);
-      },
-      sendCard: async (id: string, card: Record<string, unknown>) => {
-        await this.messageCallbacks.sendCard(id, card);
-      },
-      chatId,
-      sendFile: this.messageCallbacks.sendFile.bind(null, chatId),
-    });
-    scoutAdapter.clearThrottleState();
-    scoutAdapter.resetMessageTracking();
-
-    // Run Scout to create Task.md
-    this.logger.info({ messageId, taskPath }, 'Flow 1: Scout creating Task.md');
-    for await (const msg of scout.queryStream(text)) {
-      this.logger.debug({ content: msg.content }, 'Scout output');
-
-      // Send text content to user
-      if (msg.content && typeof msg.content === 'string') {
-        await scoutAdapter.write(msg.content, msg.messageType ?? 'text', {
-          toolName: msg.metadata?.toolName as string | undefined,
-          toolInputRaw: msg.metadata?.toolInputRaw as Record<string, unknown> | undefined,
-        });
-      }
-    }
-    this.logger.info({ taskPath }, 'Task.md created by Scout');
-
-    // === Send task.md content to user ===
-    try {
-      const taskContent = await fs.readFile(taskPath, 'utf-8');
-      await this.messageCallbacks.sendMessage(chatId, taskContent);
-    } catch (error) {
-      this.logger.error({ err: error, taskPath }, 'Failed to read/send task.md');
-    }
-
-    // === FLOW 2: Execute dialogue ===
-    return this.executeDialoguePhase(chatId, messageId, text, taskPath, agentConfig);
+    this.logger.info({ messageId, chatId }, 'Dialogue phase started async');
   }
 
   /**
-   * Execute Flow 2: Dialogue phase
+   * Run the dialogue phase (Evaluator → Executor → Reporter).
    */
-  private async executeDialoguePhase(
+  private async runDialogue(
     chatId: string,
     messageId: string,
     text: string,
     taskPath: string,
     agentConfig: { apiKey: string; model: string; apiBaseUrl?: string }
-  ): Promise<string> {
+  ): Promise<void> {
     // Import MCP tools to set message tracking callback
     const { setMessageSentCallback } = await import('../mcp/feishu-context-mcp.js');
 
-    // Create bridge with agent configs (not instances)
+    // Create bridge with agent configs
     const bridge = new DialogueOrchestrator({
       evaluatorConfig: {
         apiKey: agentConfig.apiKey,
@@ -164,14 +136,12 @@ export class TaskFlowOrchestrator {
     adapter.clearThrottleState();
     adapter.resetMessageTracking();
 
-    // Accumulate response content
-    const responseChunks: string[] = [];
     let completionReason = 'unknown';
 
     try {
-      this.logger.debug({ chatId, taskId: path.basename(taskPath, '.md') }, 'Flow 2: Starting dialogue');
+      this.logger.debug({ chatId, taskId: path.basename(taskPath, '.md') }, 'Starting dialogue');
 
-      // Run dialogue loop (Flow 2)
+      // Run dialogue loop
       for await (const message of bridge.runDialogue(taskPath, text, chatId, messageId)) {
         const content = typeof message.content === 'string'
           ? message.content
@@ -180,8 +150,6 @@ export class TaskFlowOrchestrator {
         if (!content) {
           continue;
         }
-
-        responseChunks.push(content);
 
         // Send to user
         await adapter.write(content, message.messageType ?? 'text', {
@@ -196,9 +164,6 @@ export class TaskFlowOrchestrator {
           completionReason = 'error';
         }
       }
-
-      const finalResponse = responseChunks.join('\n');
-      return finalResponse;
     } catch (error) {
       this.logger.error({ err: error, chatId }, 'Task flow failed');
       completionReason = 'error';
@@ -214,8 +179,6 @@ export class TaskFlowOrchestrator {
 
       const errorMsg = `❌ ${enriched.userMessage || enriched.message}`;
       await this.messageCallbacks.sendMessage(chatId, errorMsg);
-
-      return errorMsg;
     } finally {
       // Clean up message tracking callback to prevent memory leaks
       const { setMessageSentCallback } = await import('../mcp/feishu-context-mcp.js');

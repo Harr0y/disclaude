@@ -1,48 +1,36 @@
 /**
- * Pilot - Platform-agnostic direct chat abstraction.
+ * Pilot - Platform-agnostic direct chat abstraction with Streaming Input.
  *
- * The Pilot class handles simple conversational AI interactions without:
- * - Task.md creation (Scout's job)
- * - Command handling (CommandHandlers' job)
+ * The Pilot class manages conversational AI interactions using Claude Agent SDK's
+ * streaming input mode. It maintains persistent Agent instances per chatId, allowing
+ * for context persistence across multiple user messages.
  *
- * Instead, Pilot provides:
- * - Message queue management for streaming chats
- * - Persistent coroutine for continuous conversation
- * - Session management via SDK resume parameter
- * - Callback-based output delegation to platform-specific implementations
+ * Key Features:
+ * - Streaming Input Mode: Uses SDK's AsyncGenerator-based input for real-time interaction
+ * - Per-chatId Agent Instances: Each chatId has its own persistent Agent instance
+ * - Message Queue: Messages are queued and processed sequentially per chatId
+ * - Automatic cleanup: Idle sessions are cleaned up after a timeout
  *
- * DESIGN PRINCIPLES:
- * - Platform-agnostic: Works with any messaging platform (Feishu, Slack, Discord, etc.)
- * - Queue-based: Supports message queuing for streaming sessions
- * - Persistent: Each messageId maintains its own conversation session via SDK resume
- * - Callback-based: Uses dependency injection for sendMessage/sendCard/sendFile
- *
- * @example
- * ```typescript
- * const pilot = new Pilot({
- *   sendMessage: async (chatId, text) => { ... },
- *   sendCard: async (chatId, card) => { ... },
- *   sendFile: async (chatId, filePath) => { ... },
- * });
- *
- * // Start a conversation
- * await pilot.enqueueMessage(chatId, userMessage, messageId);
+ * Architecture:
+ * ```
+ * User Message → Pilot.processMessage()
+ *                    ↓
+ *              Get/Create state for chatId
+ *                    ↓
+ *              Push message to queue
+ *                    ↓
+ *              Message queued → Generator yields → SDK processes
+ *                    ↓
+ *              SDK output → Callbacks → Platform (Feishu/CLI)
  * ```
  */
 
-import { Config } from '../config/index.js';
+import type { SDKUserMessage, Query } from '@anthropic-ai/claude-agent-sdk';
 import { createLogger } from '../utils/logger.js';
+import { Config } from '../config/index.js';
 import { feishuSdkMcpServer } from '../mcp/feishu-context-mcp.js';
-
-/**
- * Pending message in the chat queue.
- */
-interface PendingMessage {
-  text: string;
-  messageId: string;
-  timestamp: number;
-  senderOpenId?: string;
-}
+import { taskSkillSdkMcpServer } from '../mcp/task-skill-mcp.js';
+import { parseSDKMessage } from '../utils/sdk.js';
 
 /**
  * Callback functions for platform-specific operations.
@@ -79,143 +67,254 @@ export interface PilotOptions {
    * Callback functions for platform-specific operations.
    */
   callbacks: PilotCallbacks;
+
+  /**
+   * Maximum idle time before a session is cleaned up (ms).
+   * Default: 30 minutes
+   */
+  sessionIdleTimeout?: number;
 }
 
 /**
- * Pilot - Platform-agnostic direct chat abstraction.
+ * Queued message waiting to be processed by the Agent.
+ */
+interface QueuedMessage {
+  text: string;
+  messageId: string;
+  senderOpenId?: string;
+}
+
+/**
+ * Per-chatId state for managing Agent instances.
+ */
+interface PerChatIdState {
+  /** Message queue for streaming input */
+  messageQueue: QueuedMessage[];
+  /** Resolver for signaling new messages */
+  messageResolver?: (() => void);
+  /** SDK Query instance */
+  queryInstance?: Query;
+  /** Pending Write tool files */
+  pendingWriteFiles: Set<string>;
+  /** Whether this chatId is closed */
+  closed: boolean;
+  /** Last activity timestamp */
+  lastActivity: number;
+  /** Whether the Agent loop has been started */
+  started: boolean;
+}
+
+/**
+ * Pilot - Platform-agnostic direct chat abstraction with Streaming Input.
  *
- * Handles simple conversational AI interactions via streaming SDK queries.
- * Each chatId maintains its own persistent coroutine that processes queued messages.
+ * Manages conversational AI interactions via streaming SDK queries.
+ * Each chatId gets its own persistent Agent instance that maintains
+ * conversation context across multiple messages.
  */
 export class Pilot {
   private readonly callbacks: PilotCallbacks;
   private readonly logger = createLogger('Pilot');
 
-  // Per-chatId message queues for streaming sessions
-  private chatQueues = new Map<string, PendingMessage[]>();
-  private queueReadyCallbacks = new Map<string, () => void>();
-  private activeStreams = new Map<string, Promise<void>>();
+  // Per-chatId Agent states
+  private states = new Map<string, PerChatIdState>();
 
-  // Track pending Write operations to send files after tool completion
-  // Map<chatId, Set<filePath>>
-  private pendingWriteFiles = new Map<string, Set<string>>();
+  // Session idle timeout (default: 30 minutes)
+  private readonly sessionIdleTimeout: number;
+
+  // Cleanup interval timer
+  private cleanupTimer?: ReturnType<typeof setInterval>;
 
   constructor(options: PilotOptions) {
     this.callbacks = options.callbacks;
+    this.sessionIdleTimeout = options.sessionIdleTimeout ?? 30 * 60 * 1000; // 30 minutes
+
+    // Start periodic cleanup
+    this.startCleanupTimer();
   }
 
   /**
-   * Enqueue a message for processing.
+   * Process a message with the AI agent.
    *
-   * This method adds a message to the queue and starts a streaming coroutine
-   * if one isn't already running for this chatId.
+   * This method is non-blocking - it queues the message and returns immediately.
+   * The message will be processed by the Agent instance for this chatId.
+   *
+   * If no Agent state exists for this chatId, one is created automatically.
    *
    * @param chatId - Platform-specific chat identifier
    * @param text - User's message text
-   * @param messageId - Unique message identifier for session resume
-   * @param senderOpenId - Optional sender's open_id for @ mention on result
+   * @param messageId - Unique message identifier
+   * @param senderOpenId - Optional sender's open_id for @ mentions
    */
-  enqueueMessage(
+  processMessage(
     chatId: string,
     text: string,
     messageId: string,
     senderOpenId?: string
   ): void {
-    // Initialize queue for this chatId (if not exists)
-    if (!this.chatQueues.has(chatId)) {
-      this.chatQueues.set(chatId, []);
-    }
+    this.logger.debug({ chatId, messageId, textLength: text.length }, 'Processing message');
 
-    // Add message to queue
-    const queue = this.chatQueues.get(chatId)!;
-    queue.push({ text, messageId, timestamp: Date.now(), senderOpenId });
+    // Get or create state for this chatId
+    const state = this.getOrCreateState(chatId);
 
-    this.logger.debug({
-      chatId,
-      messageId,
-      queueLength: queue.length,
-    }, 'Message enqueued');
+    // Update last activity
+    state.lastActivity = Date.now();
 
-    // Wake up the waiting generator
-    const callback = this.queueReadyCallbacks.get(chatId);
-    if (callback) {
-      callback();
-    }
+    // Push message to the queue
+    state.messageQueue.push({ text, messageId, senderOpenId });
 
-    // Start streaming processing (if not already running)
-    // Coroutine runs forever, does not auto-exit
-    if (!this.activeStreams.has(chatId)) {
-      this.logger.info({ chatId }, 'Starting new stream for chat');
-
-      const streamPromise = this.runStreamingChat(chatId);
-      this.activeStreams.set(chatId, streamPromise);
-
-      // Clean up and allow restart on error
-      streamPromise.catch((err) => {
-        this.logger.error({ err, chatId }, 'Stream error, stream terminated');
-
-        // Remove from active streams to allow restart on next message
-        this.activeStreams.delete(chatId);
-
-        // Also clean up queue callback to prevent memory leak
-        this.queueReadyCallbacks.delete(chatId);
-      });
+    // Signal the generator that a new message is available
+    if (state.messageResolver) {
+      state.messageResolver();
     }
   }
 
   /**
-   * Run streaming chat for a specific chatId.
+   * Get or create a PerChatIdState for a chatId.
    *
-   * This method creates a persistent coroutine that:
-   * 1. Waits for messages in the queue
-   * 2. Sends them to the SDK
-   * 3. Streams responses back to the user via callbacks
-   *
-   * The coroutine runs forever until an error occurs.
-   *
-   * @param chatId - Platform-specific chat identifier
+   * If a state already exists and is active, it's reused.
+   * If not, a new state is created and started.
    */
-  private async runStreamingChat(chatId: string): Promise<void> {
-    // Create async generator for SDK use
-    // Note: This generator never ends, always waits for new messages
-    async function* messageGenerator(
-      getQueue: () => PendingMessage[],
-      waitForMessage: () => Promise<void>
-    ) {
-      while (true) {  // Infinite loop, coroutine never exits
-        const queue = getQueue();
-        if (queue.length > 0) {
-          const msg = queue.shift()!;
-          yield {
-            type: 'user',
-            parent_tool_use_id: null,
-            session_id: null,
-            message: {
-              role: 'user',
-              content: msg.text,
-            },
-          } as const;
-        } else {
-          // Wait for new message when queue is empty, do not exit
-          await waitForMessage();
-        }
-      }
+  private getOrCreateState(chatId: string): PerChatIdState {
+    const existing = this.states.get(chatId);
+
+    // Check if existing state is still active
+    if (existing && !existing.closed && existing.started) {
+      this.logger.debug({ chatId }, 'Reusing existing state');
+      return existing;
     }
 
-    // Promise that resolves when a new message arrives
-    const waitForMessage = () =>
-      new Promise<void>(resolve => {
-        this.queueReadyCallbacks.set(chatId, resolve);
+    // Create new state
+    this.logger.info({ chatId }, 'Creating new state');
+
+    const state: PerChatIdState = {
+      messageQueue: [],
+      messageResolver: undefined,
+      queryInstance: undefined,
+      pendingWriteFiles: new Set(),
+      closed: false,
+      lastActivity: Date.now(),
+      started: false,
+    };
+
+    this.states.set(chatId, state);
+
+    // Start the Agent loop
+    this.startAgentLoop(chatId).catch((err) => {
+      this.logger.error({ err, chatId }, 'Failed to start Agent loop');
+    });
+
+    return state;
+  }
+
+  /**
+   * Build enhanced content with Feishu context.
+   */
+  private buildEnhancedContent(chatId: string, msg: QueuedMessage): string {
+    if (msg.senderOpenId) {
+      return `You are responding in a Feishu chat.
+
+**Chat ID:** ${chatId}
+**Sender Open ID:** ${msg.senderOpenId}
+
+---
+
+## @ Mention the User
+
+To notify the user in your FINAL response, use:
+\`\`\`
+<at user_id="${msg.senderOpenId}">@用户</at>
+\`\`\`
+
+**Rules:**
+- Use @ ONLY in your **final/complete response**, NOT in intermediate messages
+- This triggers a Feishu notification to the user
+
+---
+
+## Tools
+
+When using send_file_to_feishu or send_user_feedback, use Chat ID: \`${chatId}\`
+
+--- User Message ---
+${msg.text}`;
+    }
+
+    return `You are responding in a Feishu chat.
+
+**Chat ID:** ${chatId}
+
+When using send_file_to_feishu or send_user_feedback, use this Chat ID.
+
+--- User Message ---
+${msg.text}`;
+  }
+
+  /**
+   * Message generator for SDK streaming input.
+   *
+   * This AsyncGenerator yields messages from the queue, waiting
+   * for new messages when the queue is empty.
+   */
+  private async *messageGenerator(chatId: string): AsyncGenerator<SDKUserMessage> {
+    const state = this.states.get(chatId);
+    if (!state) {
+      return;
+    }
+
+    while (!state.closed) {
+      // Yield all queued messages
+      while (state.messageQueue.length > 0) {
+        const msg = state.messageQueue.shift();
+        if (!msg) {
+          break;
+        }
+        this.logger.debug({ messageId: msg.messageId }, 'Yielding message to Agent');
+
+        // Build user message with context
+        const enhancedContent = this.buildEnhancedContent(chatId, msg);
+
+        yield {
+          type: 'user',
+          message: {
+            role: 'user',
+            content: enhancedContent,
+          },
+          parent_tool_use_id: null,
+          session_id: '', // Empty string - SDK handles session internally
+        };
+      }
+
+      // If closed, stop the generator
+      if (state.closed) {
+        return;
+      }
+
+      // Wait for new messages
+      await new Promise<void>((resolve) => {
+        state.messageResolver = resolve;
       });
+      state.messageResolver = undefined;
+    }
+  }
 
-    const generator = messageGenerator(
-      () => this.chatQueues.get(chatId) || [],
-      waitForMessage
-    );
+  /**
+   * Main Agent loop - processes SDK messages.
+   */
+  private async startAgentLoop(chatId: string): Promise<void> {
+    const state = this.states.get(chatId);
+    if (!state) {
+      return;
+    }
 
-    // Configure SDK
+    if (state.started) {
+      this.logger.warn({ chatId }, 'Agent loop already started');
+      return;
+    }
+
+    state.started = true;
+
     const { query } = await import('@anthropic-ai/claude-agent-sdk');
-    const { createAgentSdkOptions, parseSDKMessage } = await import('../utils/sdk.js');
+    const { createAgentSdkOptions } = await import('../utils/sdk.js');
     const agentConfig = Config.getAgentConfig();
 
     const sdkOptions = createAgentSdkOptions({
@@ -223,128 +322,258 @@ export class Pilot {
       model: agentConfig.model,
       apiBaseUrl: agentConfig.apiBaseUrl,
       permissionMode: 'bypassPermissions',
+      disallowedTools: ['AskUserQuestion'],
     });
 
-    // Add Feishu MCP server for send_file_to_feishu tool
-    // This provides the file sending capability without overriding allowedTools
-    (sdkOptions as any).mcpServers = {
+    // Add MCP servers for task tools
+    (sdkOptions as Record<string, unknown>).mcpServers = {
       'feishu-context': feishuSdkMcpServer,
+      'task-skill': taskSkillSdkMcpServer,
     };
 
-    this.logger.info({ chatId }, 'Starting streaming chat');
+    this.logger.info({ chatId }, 'Starting SDK query with streaming input');
 
-    // Start streaming query - runs forever, never ends
-    // Type assertion: generator matches SDK input format
     try {
-      for await (const message of query({ prompt: generator as any, options: sdkOptions })) {
-      const parsed = parseSDKMessage(message);
+      // Create query with streaming input generator
+      state.queryInstance = query({
+        prompt: this.messageGenerator(chatId),
+        options: sdkOptions,
+      });
 
-      // Track Write tool use events - don't send file yet, wait for tool completion
-      const isWriteTool = parsed.type === 'tool_use' &&
-                         parsed.metadata?.toolName === 'Write';
-
-      if (isWriteTool && parsed.metadata?.toolInputRaw) {
-        // Extract file path from tool input (handles both file_path and filePath)
-        const toolInput = parsed.metadata.toolInputRaw;
-        const filePath = (toolInput as any).file_path || (toolInput as any).filePath;
-
-        if (filePath) {
-          // Initialize pending files set for this chatId if not exists
-          if (!this.pendingWriteFiles.has(chatId)) {
-            this.pendingWriteFiles.set(chatId, new Set());
-          }
-
-          // Track this file as pending - will be sent after tool completes
-          this.pendingWriteFiles.get(chatId)!.add(filePath);
-          this.logger.debug({ filePath, chatId }, 'Write tool detected, file marked as pending');
+      // Process SDK messages
+      for await (const message of state.queryInstance) {
+        if (state.closed) {
+          break;
         }
-      }
 
-      // Send file when Write tool completes (tool_result indicates tool completion)
-      const isToolComplete = parsed.type === 'tool_result';
+        // Parse and process the message
+        const parsed = parseSDKMessage(message);
 
-      if (isToolComplete) {
-        // Get pending files for this chatId
-        const pendingFiles = this.pendingWriteFiles.get(chatId);
-        if (pendingFiles && pendingFiles.size > 0) {
-          this.logger.debug({ pendingFileCount: pendingFiles.size, chatId }, 'Tool completed, sending pending files');
+        // Update activity timestamp
+        state.lastActivity = Date.now();
 
-          // Send each pending file
-          for (const filePath of pendingFiles) {
+        // Track Write tool operations
+        const isWriteTool =
+          parsed.type === 'tool_use' && parsed.metadata?.toolName === 'Write';
+
+        if (isWriteTool && parsed.metadata?.toolInputRaw) {
+          const toolInput = parsed.metadata.toolInputRaw as Record<string, unknown>;
+          const filePath =
+            (toolInput.file_path || toolInput.filePath) as string | undefined;
+
+          if (filePath) {
+            state.pendingWriteFiles.add(filePath);
+            this.logger.debug({ filePath, chatId }, 'Write tool detected');
+          }
+        }
+
+        // Send file when Write tool completes
+        if (parsed.type === 'tool_result' && state.pendingWriteFiles.size > 0) {
+          const filePaths = Array.from(state.pendingWriteFiles);
+          state.pendingWriteFiles.clear();
+          this.logger.debug(
+            { fileCount: filePaths.length, chatId },
+            'Write tool completed'
+          );
+
+          for (const filePath of filePaths) {
             try {
               await this.callbacks.sendFile(chatId, filePath);
-              this.logger.info({ filePath, chatId }, 'File sent via Pilot after tool completion');
+              this.logger.info({ filePath, chatId }, 'File sent');
             } catch (error) {
-              this.logger.error({ err: error, filePath, chatId }, 'Failed to send file via Pilot');
+              const err = error as Error;
+              this.logger.error({ err, filePath, chatId }, 'Failed to send file');
+              await this.callbacks.sendMessage(
+                chatId,
+                `❌ Failed to send file: ${filePath}`
+              );
             }
           }
+        }
 
-          // Clear pending files after sending
-          pendingFiles.clear();
+        // Send message content to callback
+        if (parsed.content) {
+          await this.callbacks.sendMessage(chatId, parsed.content);
         }
       }
 
-      // Send text content (for progress updates, tool notifications, etc.)
-      // Note: @ mention is handled by the Agent in its final response via prompt instructions
-      if (parsed.content) {
-        await this.callbacks.sendMessage(chatId, parsed.content);
+      this.logger.info({ chatId }, 'Agent loop completed normally');
+
+      // Remove state from map on completion
+      this.states.delete(chatId);
+    } catch (error) {
+      const err = error as Error;
+      this.logger.error({ err, chatId }, 'Agent loop error');
+
+      await this.callbacks.sendMessage(chatId, `❌ Session error: ${err.message}`);
+
+      // Remove state from map on error
+      this.states.delete(chatId);
+    }
+  }
+
+  /**
+   * Start periodic cleanup timer for idle sessions.
+   */
+  private startCleanupTimer(): void {
+    // Run cleanup every 5 minutes
+    this.cleanupTimer = setInterval(() => {
+      this.cleanupIdleStates();
+    }, 5 * 60 * 1000);
+  }
+
+  /**
+   * Cleanup states that have been idle for too long.
+   */
+  private cleanupIdleStates(): void {
+    const now = Date.now();
+    const toCleanup: string[] = [];
+
+    for (const [chatId, state] of this.states) {
+      const idleTime = now - state.lastActivity;
+
+      if (idleTime > this.sessionIdleTimeout) {
+        this.logger.info(
+          { chatId, idleTimeMs: idleTime, timeoutMs: this.sessionIdleTimeout },
+          'State idle timeout'
+        );
+        toCleanup.push(chatId);
       }
     }
-    } catch (error) {
-      // Handle streaming errors (including 429 quota errors)
-      const err = error as Error;
-      this.logger.error({
-        err,
-        chatId,
-        message: err.message,
-      }, 'Stream query error, terminating coroutine');
 
-      // Re-throw to trigger the catch block in enqueueMessage
-      throw error;
+    // Close idle states
+    for (const chatId of toCleanup) {
+      const state = this.states.get(chatId);
+      if (state) {
+        state.closed = true;
+        if (state.queryInstance) {
+          state.queryInstance.close();
+        }
+      }
     }
-
-    // Theoretically never reaches here, unless a serious error occurs
-    this.logger.warn({ chatId }, 'Streaming chat ended unexpectedly');
   }
 
   /**
-   * Check if a streaming session is active for a chatId.
+   * Check if an Agent session is active for a chatId.
    *
    * @param chatId - Platform-specific chat identifier
-   * @returns true if a streaming session is active
+   * @returns true if a session is active
    */
   hasActiveStream(chatId: string): boolean {
-    return this.activeStreams.has(chatId);
+    const state = this.states.get(chatId);
+    return state?.started === true && state.closed === false;
   }
 
   /**
-   * Get the number of pending messages in the queue.
+   * Get the number of pending messages in the queue for a chatId.
    *
    * @param chatId - Platform-specific chat identifier
    * @returns Number of pending messages
    */
   getQueueLength(chatId: string): number {
-    const queue = this.chatQueues.get(chatId);
-    return queue ? queue.length : 0;
+    const state = this.states.get(chatId);
+    if (!state) {
+      return 0;
+    }
+    return state.messageQueue.length > 0 ? 1 : 0;
   }
 
   /**
-   * Clear all pending messages for a chatId.
+   * Clear all state for a chatId (close session and remove from map).
    *
    * @param chatId - Platform-specific chat identifier
    */
   clearQueue(chatId: string): void {
-    this.chatQueues.delete(chatId);
-    this.logger.debug({ chatId }, 'Queue cleared');
+    const state = this.states.get(chatId);
+    if (state) {
+      state.closed = true;
+      if (state.messageResolver) {
+        state.messageResolver();
+      }
+      if (state.queryInstance) {
+        state.queryInstance.close();
+      }
+    }
+    this.states.delete(chatId);
+    this.logger.debug({ chatId }, 'State cleared');
   }
 
   /**
    * Clear all pending files for a chatId.
    *
+   * Note: In the new implementation, file tracking is internal to the state.
+   * This method is kept for API compatibility.
+   *
    * @param chatId - Platform-specific chat identifier
    */
   clearPendingFiles(chatId: string): void {
-    this.pendingWriteFiles.delete(chatId);
+    const state = this.states.get(chatId);
+    if (state) {
+      state.pendingWriteFiles.clear();
+    }
     this.logger.debug({ chatId }, 'Pending files cleared');
+  }
+
+  /**
+   * Reset all states (close all and start fresh).
+   *
+   * This is useful for /reset commands that clear all conversation context.
+   */
+  resetAll(): void {
+    this.logger.info('Resetting all states');
+
+    for (const [, state] of this.states) {
+      state.closed = true;
+      if (state.messageResolver) {
+        state.messageResolver();
+      }
+      if (state.queryInstance) {
+        state.queryInstance.close();
+      }
+    }
+
+    this.states.clear();
+    this.logger.info('All states reset');
+  }
+
+  /**
+   * Get the number of active states.
+   */
+  getActiveSessionCount(): number {
+    let count = 0;
+    for (const state of this.states.values()) {
+      if (state.started && !state.closed) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  /**
+   * Cleanup resources on shutdown.
+   */
+  async shutdown(): Promise<void> {
+    await Promise.resolve(); // No-op to satisfy linter
+    this.logger.info('Shutting down Pilot');
+
+    // Stop cleanup timer
+    if (this.cleanupTimer) {
+      clearInterval(this.cleanupTimer);
+      this.cleanupTimer = undefined;
+    }
+
+    // Close all states
+    for (const [, state] of this.states) {
+      state.closed = true;
+      if (state.messageResolver) {
+        state.messageResolver();
+      }
+      if (state.queryInstance) {
+        state.queryInstance.close();
+      }
+    }
+
+    this.states.clear();
+    this.logger.info('Pilot shutdown complete');
   }
 }

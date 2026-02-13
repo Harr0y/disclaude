@@ -136,8 +136,7 @@ Disclaude is a multi-platform AI agent bot bridging messaging platforms (Feishu/
 
 ### Entry Points
 
-- **`src/cli-entry.ts`** - Primary entry, handles `disclaude feishu` and `disclaude --prompt`
-- **`src/index.ts`** - Legacy entry, shows usage hint
+- **`src/cli-entry.ts`** - Main CLI entry, handles `disclaude feishu` and `disclaude --prompt`
 
 ### Core Components
 
@@ -286,11 +285,10 @@ For each SDK message:
 
 ### Build Output
 
-- **Builder**: `tsup` ( wraps esbuild)
+- **Builder**: `tsup` (wraps esbuild)
 - **Output dir**: `dist/`
 - **Entry points**:
   - `dist/cli-entry.js` - Main binary entry point
-  - `dist/index.js` - Legacy compatibility
 
 ### Testing
 
@@ -392,7 +390,7 @@ When adding new tools:
 
 **IMPORTANT**: All Agent outputs MUST be logged in full, not just metadata (like length).
 
-- **Agent outputs** (Evaluator/Executor/Reporter/Scout): Must include a `content` field with the full text
+- **Agent outputs** (Evaluator/Executor/Reporter): Must include a `content` field with the full text
 - **Example**: `logger.debug({ content: text, textLength: text.length }, 'Agent output')`
 - **Purpose**: Enables task retrospection and debugging by showing actual Agent output
 
@@ -422,7 +420,6 @@ logger.debug({
 ### Locations
 
 - `src/agent/stream-bridge.ts`: Executor and Reporter outputs
-- `src/feishu/bot.ts`: Scout outputs
 
 ## Debugging Tips
 

@@ -6,13 +6,14 @@
  *
  * {task_id}/
  *   ├── task.md
+ *   ├── final_result.md (created by Executor when task is complete)
  *   └── iterations/
  *       ├── iter-1/
- *       │   ├── evaluation.md
- *       │   └── steps/
- *       │       ├── step-1.md
- *       │       └── step-2.md
+ *       │   ├── evaluation.md (created by Evaluator)
+ *       │   └── execution.md (created by Executor)
  *       ├── iter-2/
+ *       │   ├── evaluation.md
+ *       │   └── execution.md
  *       └── final-summary.md
  *
  * Design Principles:
@@ -254,6 +255,91 @@ export class TaskFileManager {
    */
   getEvaluationPath(taskId: string, iteration: number): string {
     return path.join(this.getIterationDir(taskId, iteration), 'evaluation.md');
+  }
+
+  /**
+   * Check if evaluation.md exists for an iteration.
+   *
+   * @param taskId - Task identifier
+   * @param iteration - Iteration number
+   * @returns True if evaluation.md exists
+   */
+  async hasEvaluation(taskId: string, iteration: number): Promise<boolean> {
+    const evaluationPath = this.getEvaluationPath(taskId, iteration);
+
+    try {
+      await fs.access(evaluationPath);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Write execution.md for an iteration.
+   *
+   * @param taskId - Task identifier
+   * @param iteration - Iteration number
+   * @param content - Markdown content for execution.md
+   */
+  async writeExecution(taskId: string, iteration: number, content: string): Promise<void> {
+    const executionPath = this.getExecutionPath(taskId, iteration);
+
+    try {
+      await fs.writeFile(executionPath, content, 'utf-8');
+      logger.debug({ taskId, iteration }, 'Execution written');
+    } catch (error) {
+      logger.error({ err: error, taskId, iteration }, 'Failed to write execution');
+      throw error;
+    }
+  }
+
+  /**
+   * Read execution.md content.
+   *
+   * @param taskId - Task identifier
+   * @param iteration - Iteration number
+   * @returns Content of execution.md
+   */
+  async readExecution(taskId: string, iteration: number): Promise<string> {
+    const executionPath = this.getExecutionPath(taskId, iteration);
+
+    try {
+      const content = await fs.readFile(executionPath, 'utf-8');
+      return content;
+    } catch (error) {
+      logger.error({ err: error, taskId, iteration }, 'Failed to read execution');
+      throw error;
+    }
+  }
+
+  /**
+   * Get execution.md file path for a given task and iteration.
+   *
+   * @param taskId - Task identifier
+   * @param iteration - Iteration number
+   * @returns Absolute path to execution.md file
+   */
+  getExecutionPath(taskId: string, iteration: number): string {
+    return path.join(this.getIterationDir(taskId, iteration), 'execution.md');
+  }
+
+  /**
+   * Check if execution.md exists for an iteration.
+   *
+   * @param taskId - Task identifier
+   * @param iteration - Iteration number
+   * @returns True if execution.md exists
+   */
+  async hasExecution(taskId: string, iteration: number): Promise<boolean> {
+    const executionPath = this.getExecutionPath(taskId, iteration);
+
+    try {
+      await fs.access(executionPath);
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**

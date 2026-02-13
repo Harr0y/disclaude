@@ -9,12 +9,12 @@ import { TaskTracker } from '../utils/task-tracker.js';
 import { createLogger } from '../utils/logger.js';
 import { attachmentManager } from './attachment-manager.js';
 import { downloadFile } from './file-downloader.js';
-import { messageHistoryManager } from './message-history.js';
 import { messageLogger } from './message-logger.js';
 import { Pilot } from '../pilot/index.js';
 import { FileHandler } from './file-handler.js';
 import { MessageSender } from './message-sender.js';
 import { TaskFlowOrchestrator } from './task-flow-orchestrator.js';
+import { setTaskFlowOrchestrator } from '../mcp/task-skill-mcp.js';
 
 /**
  * Feishu/Lark bot using WebSocket.
@@ -42,10 +42,10 @@ export class FeishuBot extends EventEmitter {
   // Message sender for sending messages
   private messageSender?: MessageSender;
 
-  // Task flow orchestrator for Scout → Dialogue flow
+  // Task flow orchestrator for dialogue execution (triggered by start_dialogue tool)
   private taskFlowOrchestrator: TaskFlowOrchestrator;
 
-  // Pilot instance for direct chat mode
+  // Pilot instance for all message handling
   private pilot: Pilot;
 
   constructor(
@@ -84,7 +84,7 @@ export class FeishuBot extends EventEmitter {
       }
     );
 
-    // Initialize TaskFlowOrchestrator
+    // Initialize TaskFlowOrchestrator for dialogue phase
     this.taskFlowOrchestrator = new TaskFlowOrchestrator(
       this.taskTracker,
       {
@@ -94,6 +94,9 @@ export class FeishuBot extends EventEmitter {
       },
       this.logger
     );
+
+    // Register TaskFlowOrchestrator for task skill MCP tool access
+    setTaskFlowOrchestrator(this.taskFlowOrchestrator);
 
     // Initialize Pilot with Feishu-specific callbacks
     this.pilot = new Pilot({
@@ -192,49 +195,16 @@ export class FeishuBot extends EventEmitter {
   }
 
   /**
-   * Handle the complete task flow: Flow 1 (create Task.md) → Flow 2 (execute dialogue)
+   * Handle direct chat mode - All messages go through Pilot.
    *
-   * Delegates to TaskFlowOrchestrator for Scout → Dialogue execution.
-   *
-   * @param chatId - Feishu chat ID
-   * @param text - User's message text
-   * @param messageId - Unique message identifier
-   * @param sender - Message sender info
-   * @returns Accumulated response content
-   */
-  private async handleTaskFlow(
-    chatId: string,
-    text: string,
-    messageId: string,
-    sender?: { sender_type?: string; sender_id?: { open_id?: string; union_id?: string; user_id?: string } }
-  ): Promise<string> {
-    const conversationHistory = messageHistoryManager.getFormattedHistory(chatId, 20);
-
-    return this.taskFlowOrchestrator.execute({
-      chatId,
-      messageId,
-      text,
-      sender,
-      conversationHistory,
-    });
-  }
-
-  /**
-   * Handle direct chat mode - Simple SDK query without Task.md.
-   * This is the DEFAULT behavior when no command is given.
-   *
-   * Key differences from handleTaskFlow:
-   * - No Scout agent
-   * - No Task.md creation
-   * - No Executor/Evaluator dialogue loop
-   * - Direct SDK query with session resume
-   *
-   * This method delegates to the Pilot abstraction for platform-agnostic
-   * direct chat functionality.
+   * Pilot handles:
+   * - Direct chat for simple queries
+   * - Task skill activation for complex requests
+   * - Task.md creation and start_dialogue tool calling
    *
    * @param chatId - Feishu chat ID
    * @param text - User's message text
-   * @param messageId - Unique message identifier for session resume
+   * @param messageId - Unique message identifier (for tracking only)
    * @param sender - Message sender info (contains open_id for @ mentions)
    * @returns Accumulated response content
    */
@@ -253,100 +223,28 @@ export class FeishuBot extends EventEmitter {
     // Extract sender's open_id for @ mention capability
     const senderOpenId = this.extractOpenId(sender);
 
-    // Build enhanced prompt with context
-    let enhancedText: string;
-
-    if (senderOpenId) {
-      // Include @ mention instructions when we have the user's open_id
-      enhancedText = `You are responding in a Feishu chat.
-
-**Chat ID:** ${chatId}
-**Sender Open ID:** ${senderOpenId}
-
----
-
-## @ Mention the User
-
-To notify the user in your FINAL response, use:
-\`\`\`
-<at user_id="${senderOpenId}">@用户</at>
-\`\`\`
-
-**Rules:**
-- Use @ ONLY in your **final/complete response**, NOT in intermediate messages
-- This triggers a Feishu notification to the user
-
----
-
-## Tools
-
-When using send_file_to_feishu or send_user_feedback, use Chat ID: \`${chatId}\`
-
---- User Message ---
-${text}`;
-    } else {
-      // Fallback: no open_id available
-      enhancedText = `You are responding in a Feishu chat.
-
-**Chat ID:** ${chatId}
-
-When using send_file_to_feishu or send_user_feedback, use this Chat ID.
-
---- User Message ---
-${text}`;
-    }
-
-    // Delegate to Pilot for streaming chat
-    await this.pilot.enqueueMessage(chatId, enhancedText, messageId, senderOpenId);
+    // Delegate to Pilot for all message handling
+    this.pilot.processMessage(chatId, text, messageId, senderOpenId);
 
     return '';
   }
 
   /**
-   * Reset Pilot instance to clear all conversation context.
-   *
-   * This creates a new Pilot instance, effectively clearing all:
-   * - Message queues
-   * - Active streams
-   * - Session history (via SDK resume)
-   *
-   * Called when user sends /reset command.
-   */
-  private resetPilot(): void {
-    this.logger.info('Resetting Pilot instance to clear conversation context');
-
-    // Create new Pilot instance with same callbacks
-    this.pilot = new Pilot({
-      callbacks: {
-        sendMessage: this.sendMessage.bind(this),
-        sendCard: this.sendCard.bind(this),
-        sendFile: this.sendFileToUser.bind(this),
-      },
-    });
-
-    this.logger.info('Pilot reset complete');
-  }
-
-  /**
-   * Handle /long command - start long task workflow.
-   */
-
-  /**
    * Handle incoming message event from WebSocket.
    */
   private async handleMessageReceive(data: any): Promise<void> {
-    if (!this.running) {return;}
+    if (!this.running) { return; }
 
     // Ensure client is initialized before processing any message
     // This is critical for file/image downloads which need the client
     this.getClient();
 
     // Feishu event structure: data.event contains both sender and message
-    // See: https://open.feishu.cn/document/server-docs/im-v1/message/events/receive
+    // See: https://open.feishu.cn/document/server-docs/im-v1/message/events/receive_v1
     const event = data.event || data;
     const { message, sender } = event;
 
-    if (!message) {return;}
+    if (!message) { return; }
 
     const { message_id, chat_id, content, message_type, create_time } = message;
 
@@ -427,7 +325,7 @@ ${text}`;
         const latestAttachment = attachments[attachments.length - 1];
         const uploadPrompt = this.fileHandler.buildUploadPrompt(latestAttachment);
 
-        // Add Feishu chat context to the prompt
+        // Add Feishu chat context to prompt
         const enhancedPrompt = `You are responding in a Feishu chat.
 
 **Chat ID for sending files/messages:** ${chat_id}
@@ -437,7 +335,7 @@ When using tools like send_file_to_feishu or send_user_feedback, use this exact 
 ---- User Message ---
 ${uploadPrompt}`;
 
-        // Log the file upload to message history (this also marks message as processed)
+        // Log to file upload to message history (this also marks message as processed)
         await messageLogger.logIncomingMessage(
           message_id,
           sender?.sender_id || 'unknown',
@@ -447,8 +345,8 @@ ${uploadPrompt}`;
           create_time
         );
 
-        // Enqueue the file upload notification to Pilot
-        this.pilot.enqueueMessage(chat_id, enhancedPrompt, message_id);
+        // Process file upload notification via Pilot
+        this.pilot.processMessage(chat_id, enhancedPrompt, message_id);
 
         this.logger.info({
           chatId: chat_id,
@@ -482,7 +380,7 @@ ${uploadPrompt}`;
         text = parsed.text?.trim() || '';
       } else if (message_type === 'post') {
         // Extract text from post type (rich text)
-        // Post structure: {"title":"","content":[[{"tag":"text","text":"...","style":[]}],...]}
+        // Post structure: {"title":"","content":[{"tag":"text","text":"...","style":[]},...]}
         if (parsed.content && Array.isArray(parsed.content)) {
           // content is a 2D array of text segments
           for (const row of parsed.content) {
@@ -520,37 +418,19 @@ ${uploadPrompt}`;
       create_time
     );
 
-    // Check for /task command (all other commands go to Pilot)
-    if (text.trim().startsWith('/task ')) {
-      const taskText = text.trim().substring(6).trim();
-
-      // Show usage if no task text provided
-      if (!taskText) {
-        await this.sendMessage(
-          chat_id,
-          '⚠️ Usage: `/task <your task description>`\n\nExample: `/task Analyze the authentication system`'
-        );
-        return;
-      }
-
-      // Use task flow (Scout → Task.md → DialogueOrchestrator)
-      await this.handleTaskFlow(chat_id, taskText, message_id, sender);
-      return;
-    }
-
-    // Check for /reset command - clear conversation context
+    // Check for /reset command
     if (text.trim() === '/reset') {
       this.logger.info({ chatId: chat_id }, 'Reset command triggered');
-      await this.resetPilot();
+      this.pilot.resetAll();
       await this.sendMessage(
         chat_id,
-        '✅ **Conversation reset**\n\nA new conversation session has been started. All previous context has been cleared.'
+        '✅ **对话已重置**\n\n新的会话已启动，之前的上下文已清除。'
       );
       return;
     }
 
-    // DEFAULT: Direct chat mode (no Task.md, no Scout, just SDK query)
-    // All other messages (including any other "commands") go to Pilot
+    // DEFAULT: All messages go through Pilot
+    // Pilot handles task skill activation internally
     await this.handleDirectChat(chat_id, text, message_id, sender);
   }
 

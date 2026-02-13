@@ -2,13 +2,13 @@
  * Agent module exports.
  *
  * Architecture (Evaluation-Execution):
- * - Scout: Task initialization - creates Task.md with metadata
+ * - Pilot: Handles user messages with task skill for Task.md creation
  * - Evaluator: Task completion evaluation
  * - Executor: Executes tasks directly with Reporter for progress updates
  * - DialogueOrchestrator: Manages direct Evaluator-Executor flow
  *
  * Complete Workflow:
- * Flow 1: User request → Scout → Task.md (metadata + original request)
+ * Flow 1: User request → Pilot (with task skill) → Task.md
  * Flow 2: Task.md → Evaluator (evaluate) → Executor (execute directly) → ...
  *
  * Evaluation-Execution Flow:
@@ -24,7 +24,6 @@
  */
 
 // Core agents
-export { Scout } from '../agents/scout.js';
 export { Evaluator } from '../agents/evaluator.js';
 
 // Bridges

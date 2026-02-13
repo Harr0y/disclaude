@@ -37,8 +37,7 @@ import type { AgentMessage, AgentInput } from '../types/agent.js';
 import { feishuSdkMcpServer } from '../mcp/feishu-context-mcp.js';
 import { createLogger } from '../utils/logger.js';
 import { loadSkillOrThrow, type ParsedSkill } from '../task/skill-loader.js';
-import type { EvaluationResult } from './evaluator.js';
-import { AgentExecutionError, TimeoutError, formatError } from '../utils/errors.js';
+import { AgentExecutionError, formatError } from '../utils/errors.js';
 
 /**
  * Input type for Reporter queries.
@@ -138,21 +137,19 @@ export class Reporter {
       sdkOptions.model = this.model;
     }
 
-    const ITERATOR_TIMEOUT_MS = 30000; // 30 seconds timeout for Reporter
+    // Reporter does NOT have a timeout limit.
+    // Rationale:
+    // 1. Reporter is invoked during Executor execution to provide user feedback
+    // 2. Timeout errors mislead users into thinking the task failed
+    // 3. The task has already completed by the time Reporter is called for 'complete' events
+    // 4. SDK has its own timeout mechanisms for API calls
 
     try {
-      // Query SDK with timeout protection
       const queryResult = query({ prompt: input, options: sdkOptions as any });
       const iterator = queryResult[Symbol.asyncIterator]();
 
       while (true) {
-        // Race between next message and timeout
-        const nextPromise = iterator.next();
-        const timeoutPromise = new Promise((_, reject) =>
-          setTimeout(() => reject(new Error('Iterator timeout')), ITERATOR_TIMEOUT_MS)
-        );
-
-        const result = await Promise.race([nextPromise, timeoutPromise]) as IteratorResult<unknown>;
+        const result = await iterator.next();
 
         if (result.done) {
           break;
@@ -183,34 +180,20 @@ export class Reporter {
         };
       }
     } catch (error) {
-      if (error instanceof Error && error.message === 'Iterator timeout') {
-        const timeoutError = new TimeoutError(
-          'Reporter query timeout - unable to generate report',
-          ITERATOR_TIMEOUT_MS,
-          'queryStream'
-        );
-        this.logger.warn({ err: formatError(timeoutError) }, 'Reporter iterator timeout - unable to complete reporting');
-        yield {
-          content: '⚠️ Query timeout - unable to generate report',
-          role: 'assistant',
-          messageType: 'error',
-        };
-      } else {
-        const agentError = new AgentExecutionError(
-          'Reporter query failed',
-          {
-            cause: error instanceof Error ? error : new Error(String(error)),
-            agent: 'Reporter',
-            recoverable: true,
-          }
-        );
-        this.logger.error({ err: formatError(agentError) }, 'Reporter query failed');
-        yield {
-          content: `❌ Error: ${error instanceof Error ? error.message : String(error)}`,
-          role: 'assistant',
-          messageType: 'error',
-        };
-      }
+      const agentError = new AgentExecutionError(
+        'Reporter query failed',
+        {
+          cause: error instanceof Error ? error : new Error(String(error)),
+          agent: 'Reporter',
+          recoverable: true,
+        }
+      );
+      this.logger.error({ err: formatError(agentError) }, 'Reporter query failed');
+      yield {
+        content: `❌ Reporter error: ${error instanceof Error ? error.message : String(error)}`,
+        role: 'assistant',
+        messageType: 'error',
+      };
     }
   }
 
@@ -227,9 +210,9 @@ export class Reporter {
     taskMdContent: string,
     iteration: number,
     workerOutput: string | undefined,
-    evaluation: EvaluationResult
+    evaluationContent: string
   ): Promise<AgentMessage[]> {
-    const prompt = Reporter.buildReportPrompt(taskMdContent, iteration, workerOutput, evaluation);
+    const prompt = Reporter.buildReportPrompt(taskMdContent, iteration, workerOutput, evaluationContent);
     const messages: AgentMessage[] = [];
 
     // Collect all messages from queryStream
@@ -247,7 +230,7 @@ export class Reporter {
     taskMdContent: string,
     iteration: number,
     workerOutput: string | undefined,
-    evaluation: EvaluationResult
+    evaluationContent: string
   ): string {
     let prompt = `${taskMdContent}
 
@@ -279,120 +262,36 @@ ${workerOutput}
 `;
     }
 
-    // Add evaluation result
+    // Add evaluation result (markdown format)
     prompt += `## Evaluator's Assessment
 
-\`\`\`json
-{
-  "is_complete": ${evaluation.is_complete},
-  "reason": "${evaluation.reason}",
-  "missing_items": ${JSON.stringify(evaluation.missing_items)},
-  "confidence": ${evaluation.confidence}
-}
-\`\`\`
+${evaluationContent}
 
 ---
 
 `;
 
     // Add report instructions
-    if (!hasExecutorOutput) {
-      prompt += `### Your Reporting Task
-
-**⚠️ FIRST ITERATION - Executor has NOT executed yet**
-
-**Evaluator determined: Task is NOT complete**
-- Reason: ${evaluation.reason}
-- Missing items: ${evaluation.missing_items.join(', ')}
+    prompt += `### Your Reporting Task
 
 **Your Job:**
-1. Read Task.md Expected Results
-2. Generate clear, actionable Executor instructions
-3. Use send_user_feedback to send instructions to user
-
-**What to include in Executor instructions:**
-- Primary objective (what to do)
-- Key requirements (constraints, success criteria)
-- Reference materials (files to read, patterns to follow)
-- Testing approach (if applicable)
-
-**Instruction Style:**
-- Be concise and specific
-- Focus on WHAT to do, not HOW to do it
-- Use clear language (avoid ambiguity)
-- Organize with bullet points or numbered steps
-
-**What NOT to do:**
-❌ DO NOT evaluate if task is complete (Evaluator's job)
-❌ DO NOT call task_done (Evaluator's job)
-❌ DO NOT judge Executor's performance
-✅ DO generate clear instructions for Executor
-✅ DO use send_user_feedback to format output
-
-**Remember**: You are the REPORTER.
-You ONLY generate instructions and format output.
-You do NOT evaluate completion (Evaluator does that).
-`;
-    } else {
-      prompt += `### Your Reporting Task
-
-**Evaluator determined: Task is ${evaluation.is_complete ? 'COMPLETE' : 'NOT COMPLETE'}**
-
-**Evaluator's Reason:** ${evaluation.reason}
-
-${!evaluation.is_complete ? `
-**Missing Items:**
-${evaluation.missing_items.map(item => `- ${item}`).join('\n')}
-
-**Your Job:**
-1. Generate specific Executor instructions to address missing items
-2. Organize progress update for user
-3. Use send_user_feedback to send formatted feedback
-
-**What to include in Executor instructions:**
-- What still needs to be done (from missing_items)
-- Specific actions to take
-- Expected outcomes
-- Testing/validation steps
+1. Read the Evaluator's assessment above
+2. Format user feedback based on the evaluation
+3. Use send_user_feedback to send feedback to user
 
 **What to include in user feedback:**
-- What Executor accomplished in this iteration
-- What still needs to be done
+- Current progress status
+- What was accomplished (if any)
+- What still needs to be done (if not complete)
 - Next steps
-
-` : `
-**Your Job:**
-- Organize final summary of what was accomplished
-- Use send_user_feedback to send completion message to user
-- Highlight key achievements and outcomes
-
-**What to include in completion message:**
-- Summary of what was done
-- Key changes made
-- Testing results (if applicable)
-- Next steps for user (if any)
-
-**DO NOT:**
-❌ Generate more Executor instructions (task is complete)
-❌ Call task_done yourself (Evaluator will do that)
-
-`}
 
 **DO NOT:**
 ❌ Evaluate if task is complete (Evaluator already did)
-❌ Call task_done (Evaluator will do that when ready)
-❌ Judge Executor's work negatively
-
-**DO:**
-✅ Provide constructive guidance
-✅ Acknowledge progress made
-✅ Focus on next steps
+❌ Generate new instructions (Executor reads evaluation.md directly)
 
 **Remember**: You are the REPORTER.
-You ONLY generate instructions and format feedback.
-You do NOT evaluate completion (Evaluator does that).
+You ONLY format and communicate feedback to users.
 `;
-    }
 
     return prompt;
   }

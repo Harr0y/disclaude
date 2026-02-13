@@ -1,43 +1,21 @@
 /**
  * Evaluator - Task completion evaluation specialist.
  *
- * **Single Responsibility**: Evaluate if a task is complete.
+ * **Single Responsibility**: Evaluate if a task is complete and output evaluation.md.
  *
- * **Key Differences from Manager:**
- * - Manager: Evaluates AND generates instructions AND formats output
- * - Evaluator: ONLY evaluates, does NOT generate instructions
+ * **Output**: Creates `evaluation.md` in the iteration directory.
+ * The file contains the evaluation result - no JSON parsing needed.
  *
- * **Tools Available:**
+ * **Tools Available**:
  * - Read, Grep, Glob: For reading task files and verifying completion
+ * - Write: For creating evaluation.md
  *
- * **Tools NOT Available (intentionally restricted):**
+ * **Tools NOT Available (intentionally restricted)**:
  * - send_user_feedback: Reporter's job, not Evaluator's
- * - task_done: No longer needed - completion detected via final_result.md
  *
- * **Simplified Decision Logic:**
- * 1. Read Task.md Expected Results
- * 2. Read Executor output (if any)
- * 3. Check completion criteria:
- *    - First iteration? → Cannot be complete (no Executor execution yet)
- *    - Code modification required? → Executor must modify files
- *    - Testing required? → Executor must run tests
- * 4. Decision:
- *    - IF complete → Return JSON with is_complete: true AND write evaluation.md
- *    - IF not complete → Return JSON with is_complete: false
- *
- * **Completion Detection:**
+ * **Completion Detection**:
  * - Task completion is determined by the presence of final_result.md (created by Executor)
- * - Evaluator's evaluation.md is used for tracking evaluation history
- * - No explicit task_done tool call needed
- *
- * **Output Format:**
- * Evaluator returns structured JSON (not user-facing text):
- * {
- *   "is_complete": boolean,
- *   "reason": string,
- *   "missing_items": string[],
- *   "confidence": number
- * }
+ * - Evaluator's evaluation.md is used for tracking evaluation history and guiding Executor
  */
 
 import { query, type SDKMessage } from '@anthropic-ai/claude-agent-sdk';
@@ -49,7 +27,7 @@ import { loadSkillOrThrow, type ParsedSkill } from '../task/skill-loader.js';
 import { TaskFileManager } from '../task/file-manager.js';
 import { AgentExecutionError, TimeoutError, formatError } from '../utils/errors.js';
 
-const logger = createLogger('Evaluator');
+// Logger instance - used via this.logger in class methods
 
 /**
  * Input type for Evaluator queries.
@@ -74,21 +52,12 @@ export interface EvaluatorConfig {
 export type EvaluatorPermissionMode = 'default' | 'bypassPermissions';
 
 /**
- * Evaluation result from Evaluator.
- */
-export interface EvaluationResult {
-  /** Whether the task is complete */
-  is_complete: boolean;
-  /** Reason for the decision */
-  reason: string;
-  /** Missing items that prevent completion (if any) */
-  missing_items: string[];
-  /** Confidence in the decision (0-1) */
-  confidence: number;
-}
-
-/**
  * Evaluator - Task completion evaluation specialist.
+ *
+ * Simplified architecture:
+ * - No JSON output - writes evaluation.md directly
+ * - No structured result parsing
+ * - File-driven workflow
  */
 export class Evaluator {
   readonly apiKey: string;
@@ -148,15 +117,13 @@ export class Evaluator {
     // Skill is required, so allowedTools is always defined
     const allowedTools = this.skill!.allowedTools;
     // Note: send_user_feedback, send_file_to_feishu are intentionally NOT included (Reporter's job)
-    // Note: task_done tool removed - completion detected via final_result.md instead
 
     const sdkOptions: Record<string, unknown> = {
       cwd: Config.getWorkspaceDir(),
       permissionMode: this.permissionMode,
       allowedTools,
       settingSources: ['project'],
-      // No MCP servers needed - Evaluator only uses file reading tools
-      // No inline tools needed - task_done removed
+      // No MCP servers needed - Evaluator only uses file reading/writing tools
     };
 
     // Set environment
@@ -244,244 +211,121 @@ export class Evaluator {
   }
 
   /**
-   * Evaluate if the task is complete.
+   * Evaluate if the task is complete (streaming version).
    *
-   * @param taskMdContent - Full Task.md content
+   * The Evaluator will create evaluation.md in the iteration directory.
+   * No structured result is returned - callers should check the file.
+   *
+   * @param taskId - Task identifier
    * @param iteration - Current iteration number
-   * @param executorOutput - Executor's output from previous iteration (if any)
-   * @returns Evaluation result
+   * @returns Async iterable of agent messages
    */
-  async evaluate(
-    taskMdContent: string,
-    iteration: number,
-    executorOutput?: string,
-    taskId?: string
-  ): Promise<{
-    result: EvaluationResult;
-    messages: AgentMessage[];
-  }> {
-    const prompt = Evaluator.buildEvaluationPrompt(taskMdContent, iteration, executorOutput);
-    const messages: AgentMessage[] = [];
+  async *evaluate(
+    taskId: string,
+    iteration: number
+  ): AsyncIterable<AgentMessage> {
+    // Ensure iteration directory exists
+    await this.fileManager.createIteration(taskId, iteration);
 
-    // Collect all messages from queryStream
+    // Build the prompt
+    const prompt = this.buildEvaluationPrompt(taskId, iteration);
+
+    this.logger.debug({
+      taskId,
+      iteration,
+    }, 'Starting evaluation');
+
+    // Stream messages from queryStream
     for await (const msg of this.queryStream(prompt)) {
-      messages.push(msg);
+      yield msg;
     }
 
-    // Parse evaluation result from messages
-    const result = Evaluator.parseEvaluationResult(messages, iteration);
-
-    // ✨ NEW: Write evaluation.md via TaskFileManager
-    if (taskId) {
-      try {
-        await this.fileManager.createIteration(taskId, iteration);
-        const evalContent = this.formatEvaluationMarkdown(result, iteration);
-        await this.fileManager.writeEvaluation(taskId, iteration, evalContent);
-        this.logger.debug({ taskId, iteration }, 'Evaluation written via TaskFileManager');
-      } catch (error) {
-        this.logger.error({ err: error, taskId, iteration }, 'Failed to write evaluation via TaskFileManager');
-      }
-    }
-
-    return {
-      result,
-      messages,
-    };
-  }
-
-  /**
-   * Format evaluation result as markdown.
-   */
-  private formatEvaluationMarkdown(result: EvaluationResult, iteration: number): string {
-    const timestamp = new Date().toISOString();
-
-    return `# Evaluation: Iteration ${iteration}
-
-**Timestamp**: ${timestamp}
-**Iteration**: ${iteration}
-
-## Completion Status
-
-**Is Complete**: ${result.is_complete}
-**Confidence**: ${result.confidence.toFixed(2)}
-
-## Assessment
-
-${result.reason}
-
-## Missing Items
-
-${result.missing_items.length > 0 ? result.missing_items.map(item => `- [ ] ${item}`).join('\n') : '(None - task is complete)'}
-
-## Recommendations
-
-${result.is_complete ? 'Task is complete. No further action needed.' : 'Task requires additional work. See missing items above.'}
-`;
-  }
-
-  /**
-   * Parse evaluation result from messages.
-   *
-   * Static method to allow external use (e.g., by IterationBridge).
-   *
-   * NOTE: task_done tool detection removed - completion is now determined
-   * by the presence of final_result.md in the task directory.
-   */
-  static parseEvaluationResult(messages: AgentMessage[], iteration: number): EvaluationResult {
-    // Try to extract JSON from messages
-    for (const msg of messages) {
-      if (typeof msg.content === 'string') {
-        // Try to extract JSON from content
-        const jsonMatch = msg.content.match(/```json\n([\s\S]*?)\n```/);
-        if (jsonMatch) {
-          try {
-            const parsed = JSON.parse(jsonMatch[1]);
-            return {
-              is_complete: parsed.is_complete || false,
-              reason: parsed.reason || 'No reason provided',
-              missing_items: parsed.missing_items || [],
-              confidence: parsed.confidence || 0.5,
-            };
-          } catch (e) {
-            logger.warn({ err: e }, 'Failed to parse evaluation JSON');
-          }
-        }
-      }
-    }
-
-    // Fallback: if first iteration, assume not complete
-    if (iteration === 1) {
-      return {
-        is_complete: false,
-        reason: 'First iteration - Executor has not executed yet',
-        missing_items: ['Executor execution', 'Code modification'],
-        confidence: 1.0,
-      };
-    }
-
-    // Default: assume not complete
-    return {
-      is_complete: false,
-      reason: 'Unable to determine completion status',
-      missing_items: ['Unknown'],
-      confidence: 0.0,
-    };
+    this.logger.debug({
+      taskId,
+      iteration,
+    }, 'Evaluation completed');
   }
 
   /**
    * Build evaluation prompt for Evaluator.
    */
-  static buildEvaluationPrompt(
-    taskMdContent: string,
-    iteration: number,
-    executorOutput?: string
-  ): string {
-    let prompt = `${taskMdContent}
+  private buildEvaluationPrompt(taskId: string, iteration: number): string {
+    const taskMdPath = this.fileManager.getTaskSpecPath(taskId);
+    const evaluationPath = this.fileManager.getEvaluationPath(taskId, iteration);
 
----
+    let previousExecutionPath: string | null = null;
+    if (iteration > 1) {
+      previousExecutionPath = this.fileManager.getExecutionPath(taskId, iteration - 1);
+    }
 
-## Current Iteration: ${iteration}
+    let prompt = `# Evaluator Task
 
+## Context
+- Task ID: ${taskId}
+- Iteration: ${iteration}
+
+## Your Job
+
+1. Read the task specification:
+   \`${taskMdPath}\`
 `;
 
-    // Add Executor output if available
-    const hasExecutorOutput = executorOutput && executorOutput.trim().length > 0;
-    if (hasExecutorOutput) {
-      prompt += `## Executor's Previous Output (Iteration ${iteration - 1})
-
-\`\`\`
-${executorOutput}
-\`\`\`
-
----
-
+    if (previousExecutionPath) {
+      prompt += `
+2. Read the previous execution output:
+   \`${previousExecutionPath}\`
 `;
     } else {
-      prompt += `## Executor's Previous Output
-
-*No Executor output yet - this is the first iteration.*
-
----
-
+      prompt += `
+2. This is the first iteration - no previous execution exists.
 `;
     }
 
-    // Add evaluation instructions
-    if (!hasExecutorOutput) {
-      prompt += `### Your Evaluation Task
+    prompt += `
+3. Evaluate if the task is complete based on Expected Results
 
-**⚠️⚠️⚠️ CRITICAL: FIRST ITERATION ⚠️⚠️⚠️**
+4. Write your evaluation to:
+   \`${evaluationPath}\`
 
-**You MUST return:**
-\`\`\`json
-{
-  "is_complete": false,
-  "reason": "This is the first iteration. Executor has not executed yet.",
-  "missing_items": ["Executor execution", "Code modification", "Testing"],
-  "confidence": 1.0
-}
+## Output Format for evaluation.md
+
+\`\`\`markdown
+# Evaluation: Iteration ${iteration}
+
+## Status
+[COMPLETE | NEED_EXECUTE]
+
+## Assessment
+（你的评估理由）
+
+## Next Actions (only if NEED_EXECUTE)
+- Action 1
+- Action 2
 \`\`\`
 
-**Why CANNOT be complete on first iteration:**
-- ❌ Executor has NOT executed yet
-- ❌ NO code has been modified
-- ❌ NO tests have been run
-- ❌ Expected Results require implementation, not just planning
+## Status Rules
 
-**Your ONLY job:**
-✅ Evaluate the task completion status
-✅ Return structured JSON result
-❌ DO NOT generate instructions for Executor
-❌ DO NOT format user-facing messages
-❌ DO NOT call task_done on first iteration
+### COMPLETE
+When ALL conditions are met:
+- ✅ All Expected Results satisfied
+- ✅ Code actually modified (not just explained)
+- ✅ Build passed (if required)
+- ✅ Tests passed (if required)
 
-**Remember**: You are the EVALUATOR, not the REPORTER.
-You ONLY judge completion, you do NOT generate instructions.
-`;
-    } else {
-      prompt += `### Your Evaluation Task
+### NEED_EXECUTE
+When ANY condition is true:
+- ❌ First iteration (no previous execution)
+- ❌ Executor only explained (no code changes)
+- ❌ Build failed or tests failed
+- ❌ Expected Results not fully satisfied
 
-**🔍 EVALUATION CHECKLIST:**
+## Important Notes
 
-Check if Executor satisfied ALL Expected Results from Task.md:
+- Write the file to \`${evaluationPath}\`
+- Do NOT output JSON - write markdown directly
+- Task completion is detected by final_result.md (created by Executor)
 
-**For tasks requiring CODE CHANGES:**
-□ Executor actually modified the code files (not just read them)
-□ Build succeeded (if required)
-□ Tests passed (if required)
-□ All Expected Results satisfied
-
-**DO NOT mark complete if:**
-❌ Executor only explained what to do
-❌ Executor only created a plan
-❌ Build failed or tests failed
-❌ Expected Results not satisfied
-
-**Your Output Format:**
-
-\`\`\`json
-{
-  "is_complete": true/false,
-  "reason": "Explanation of your decision",
-  "missing_items": ["item1", "item2"],
-  "confidence": 0.0-1.0
-}
-\`\`\`
-
-**IF complete:**
-- Call the task_done tool
-- Then STOP
-
-**IF NOT complete:**
-- Return JSON with is_complete: false
-- List missing items
-- DO NOT call task_done
-- DO NOT generate instructions (Reporter will do that)
-
-**Remember**: You are the EVALUATOR.
-You ONLY evaluate, you do NOT generate instructions.
-`;
-    }
+**Now start your evaluation.**`;
 
     return prompt;
   }

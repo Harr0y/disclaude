@@ -238,8 +238,8 @@ describe('getSkillMcpServers', () => {
     expect(config).toBeUndefined();
   });
 
-  it('should return undefined for scout skill', () => {
-    const config = getSkillMcpServers('scout');
+  it('should return undefined for task skill (uses task-skill MCP)', () => {
+    const config = getSkillMcpServers('task');
 
     expect(config).toBeUndefined();
   });

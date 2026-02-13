@@ -1,46 +1,32 @@
 /**
- * DialogueOrchestrator - Manages streaming dialogue with simplified Eval-Execute architecture.
+ * DialogueOrchestrator - Manages streaming dialogue with file-driven Eval-Execute architecture.
  *
- * ## Architecture: Eval-Execute (Simplified)
+ * ## Architecture: File-Driven Eval-Execute
  *
- * - Phase 1: Evaluator evaluates task completion
- * - Phase 2: Executor executes tasks with Evaluator's feedback
- * - Direct architecture: No intermediate layers
+ * - Phase 1: Evaluator writes evaluation.md to iteration directory
+ * - Phase 2: Executor reads evaluation.md, writes execution.md + final_result.md
+ * - Direct architecture: No intermediate layers, no JSON parsing
  * - Loop continues until max iterations reached or final_result.md detected
  *
- * ## Key Changes from Previous Architecture
+ * ## File-Driven Architecture
  *
- * **BEFORE (Plan-and-Execute)**:
- * - Evaluator → Planner → Executor (with multi-step breakdown)
- * - 3 agent instances per iteration
- * - Planner as intermediate layer
- * - Completion signaled via task_done tool
- *
- * **AFTER (Eval-Execute)**:
- * - Evaluator (evaluate) → Executor (execute directly)
- * - 2 agent instances per iteration (Evaluator + Executor)
- * - Direct feedback from Evaluator to Executor
- * - Completion detected via final_result.md file
+ * - Evaluator writes: iterations/iter-N/evaluation.md
+ * - Executor writes: iterations/iter-N/execution.md
+ * - Completion marker: final_result.md (at task root)
+ * - No JSON parsing needed - all communication via markdown files
  *
  * ## Simplified Flow
  *
  * - No Planner layer - tasks executed directly
+ * - No JSON parsing - file-based communication
  * - Executor processes the entire task in one pass
- * - Sequential execution with context passing
- * - Results evaluated for completion
- * - Task completion automatically detected when Executor creates final_result.md
- *
- * ## No Session State Across Iterations
- *
- * - Each iteration creates FRESH agent instances via IterationBridge
- * - Context is maintained via previousExecutorOutput storage between iterations
- * - No cross-iteration session IDs needed
+ * - Task completion automatically detected when final_result.md is created
  */
+
 import type { AgentMessage } from '../types/agent.js';
 import { DIALOGUE } from '../config/constants.js';
 import { createLogger } from '../utils/logger.js';
 import * as path from 'path';
-import * as fs from 'fs/promises';
 import type { EvaluatorConfig } from '../agents/evaluator.js';
 import { IterationBridge } from './iteration-bridge.js';
 import { DialogueMessageTracker } from './dialogue-message-tracker.js';
@@ -59,16 +45,15 @@ export interface DialogueOrchestratorConfig {
 /**
  * DialogueOrchestrator - Manages streaming dialogue loop with Eval-Execute.
  *
- * Refactored from AgentDialogueBridge to focus on orchestration only.
+ * File-driven architecture:
  * - Message tracking delegated to DialogueMessageTracker
  * - Uses IterationBridge for single iterations
+ * - All agent communication via markdown files
  *
- * NEW Streaming Flow:
- * 1. Each iteration: Evaluator and Executor run via IterationBridge
- * 2. Evaluator evaluates completion → Executor executes task
- * 3. All tasks executed directly (no planning phase)
- * 4. When execution completes, check for final_result.md
- * 5. Loop continues until final_result.md detected or max iterations reached
+ * Flow:
+ * 1. Each iteration: Evaluator writes evaluation.md, Executor writes execution.md
+ * 2. Check for final_result.md to determine task completion
+ * 3. Loop continues until final_result.md detected or max iterations reached
  *
  * **User Communication:**
  * - Agent output is streamed directly to users
@@ -85,9 +70,6 @@ export class DialogueOrchestrator {
   private taskId: string = '';
   private currentIterationTaskDone = false;
   private currentChatId?: string;
-
-  // Store previous Executor output for Evaluator evaluation in next iteration
-  private previousExecutorOutput?: string;
   private iterationCount: number = 0;
 
   constructor(config: DialogueOrchestratorConfig) {
@@ -117,7 +99,6 @@ export class DialogueOrchestrator {
   cleanup(): void {
     logger.debug({ taskId: this.taskId }, 'Cleaning up dialogue orchestrator');
     this.taskId = '';
-    this.previousExecutorOutput = undefined;
     this.currentChatId = undefined;
     this.messageTracker.reset();
   }
@@ -125,35 +106,24 @@ export class DialogueOrchestrator {
   /**
    * Process a single dialogue iteration with REAL-TIME streaming Evaluator-Executor communication.
    *
-   * **NEW: Uses runIterationStreaming() for immediate user feedback**
-   * - Agent messages are yielded immediately
-   * - Task progress is reported in real-time
-   * - Execution output is collected for Evaluator evaluation
-   *
-   * New Flow (Streaming):
-   *   1. Create IterationBridge with Evaluator and Executor configs
+   * File-driven Flow:
+   *   1. Create IterationBridge with task context
    *   2. Run iteration with streaming: Agent messages are yielded immediately
-   *   3. When execution sends 'result' message, iteration ends
-   *   4. Store execution output for next iteration
-   *   5. Check for final_result.md to determine task completion
+   *   3. Check for final_result.md to determine task completion
    *
-   * @param taskMdContent - Full Task.md content
    * @param iteration - Current iteration number
    * @returns Async iterable of AgentMessage (real-time execution output)
    */
   private async *processIterationStreaming(
-    taskMdContent: string,
     iteration: number
   ): AsyncIterable<AgentMessage> {
-    logger.debug({ iteration }, 'Processing iteration with simplified Eval-Execute architecture');
+    logger.debug({ iteration }, 'Processing iteration with file-driven Eval-Execute architecture');
 
-    // Create IterationBridge with all necessary context including chatId and taskId
+    // Create IterationBridge with all necessary context
     const bridge = new IterationBridge({
       evaluatorConfig: this.evaluatorConfig,
-      taskMdContent,
       iteration,
       taskId: this.taskId,
-      previousExecutorOutput: this.previousExecutorOutput,
       chatId: this.currentChatId,
     });
 
@@ -163,12 +133,6 @@ export class DialogueOrchestrator {
       yield msg;
     }
 
-    // Get Executor output from this iteration for next iteration
-    const workerOutput = bridge.getExecutorOutput();
-
-    // Store Executor output for next iteration
-    this.previousExecutorOutput = workerOutput;
-
     // Check for task completion via final_result.md (created by Executor)
     const hasFinalResult = await this.fileManager.hasFinalResult(this.taskId);
 
@@ -176,31 +140,22 @@ export class DialogueOrchestrator {
     logger.info({
       iteration,
       hasFinalResult,
-      workerOutputLength: workerOutput.length,
-    }, 'REAL-TIME streaming iteration complete');
+    }, 'Streaming iteration complete');
 
     // Update completion status for return value check
-    // (This is a bit awkward with async generators - we track via instance variable)
     this.currentIterationTaskDone = hasFinalResult;
   }
 
   /**
    * Run a dialogue loop with REAL-TIME streaming Evaluator-Executor communication.
    *
-   * **NEW: Real-time Streaming Flow**
-   * - Evaluator's and Executor's messages are yielded immediately
-   * - Users receive progress updates as they happen
-   * - Executor's output is collected for Evaluator evaluation
+   * **File-Driven Flow**
+   * - Evaluator writes evaluation.md
+   * - Executor reads evaluation.md and writes execution.md + final_result.md
    * - Task completion detected when final_result.md is created
    *
-   * Flow:
-   * 1. Each iteration: Evaluator runs and yields messages immediately
-   * 2. Executor executes based on Evaluator's feedback (output also yielded)
-   * 3. After iteration, check if final_result.md was created
-   * 4. Loop continues until final_result.md detected or max iterations reached
-   *
    * @param taskPath - Path to Task.md file
-   * @param originalRequest - Original user request text
+   * @param _originalRequest - Original user request text (unused)
    * @param chatId - Feishu chat ID (passed to IterationBridge for context)
    * @param _messageId - Unique message ID (reserved for future use)
    * @returns Async iterable of messages (real-time execution output)
@@ -218,12 +173,11 @@ export class DialogueOrchestrator {
     this.currentChatId = chatId;
     this.iterationCount = 0;
 
-    const taskMdContent = await fs.readFile(taskPath, 'utf-8');
     let iteration = 0;
 
     logger.info(
       { taskId: this.taskId, chatId, maxIterations: this.maxIterations },
-      'Starting Eval-Execute dialogue flow with REAL-TIME streaming'
+      'Starting file-driven Eval-Execute dialogue flow'
     );
 
     // Main dialogue loop: Evaluator → Executor → Evaluator → Executor → ...
@@ -235,7 +189,7 @@ export class DialogueOrchestrator {
       this.currentIterationTaskDone = false;
 
       // Process iteration with REAL-TIME streaming
-      for await (const msg of this.processIterationStreaming(taskMdContent, iteration)) {
+      for await (const msg of this.processIterationStreaming(iteration)) {
         // Yield the message immediately to the user
         yield msg;
       }
@@ -246,7 +200,7 @@ export class DialogueOrchestrator {
       }
     }
 
-    // ✨ NEW: Write final summary when task completes
+    // Write final summary when task completes
     if (this.currentIterationTaskDone) {
       await this.writeFinalSummary();
     }
@@ -260,7 +214,7 @@ export class DialogueOrchestrator {
           iteration,
           maxIterations: this.maxIterations,
         },
-        '⚠️  Task stopped after reaching maximum iterations without completion signal'
+        'Task stopped after reaching maximum iterations without completion signal'
       );
     }
   }
@@ -272,9 +226,9 @@ export class DialogueOrchestrator {
     try {
       const summary = this.generateFinalSummary();
       await this.fileManager.writeFinalSummary(this.taskId, summary);
-      logger.info({ taskId: this.taskId }, 'Final summary written via TaskFileManager');
+      logger.info({ taskId: this.taskId }, 'Final summary written');
     } catch (error) {
-      logger.error({ err: error, taskId: this.taskId }, 'Failed to write final summary via TaskFileManager');
+      logger.error({ err: error, taskId: this.taskId }, 'Failed to write final summary');
     }
   }
 
@@ -308,11 +262,12 @@ ${Array.from({ length: this.iterationCount }, (_, i) => `- Iteration ${i + 1}: E
 
 - Task specification: \`tasks/${this.taskId}/task.md\`
 - Evaluation results: \`tasks/${this.taskId}/iterations/iter-*/evaluation.md\`
-- Step results: \`tasks/${this.taskId}/iterations/iter-*/steps/step-*.md\`
+- Execution results: \`tasks/${this.taskId}/iterations/iter-*/execution.md\`
+- Final result: \`tasks/${this.taskId}/final_result.md\`
 
 ## Lessons Learned
 
-Task execution completed successfully with Evaluation-Execution architecture.
+Task execution completed successfully with file-driven Evaluation-Execution architecture.
 
 ## Recommendations
 

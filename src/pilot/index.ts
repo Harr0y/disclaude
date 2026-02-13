@@ -1,8 +1,9 @@
 /**
- * Pilot - Platform-agnostic direct chat abstraction.
+ * Pilot - Platform-agnostic direct chat abstraction with Streaming Input.
  *
- * Provides a clean abstraction for handling simple conversational AI interactions
- * without the complexity of Task.md creation, Scout agents, or long task workflows.
+ * Provides a clean abstraction for handling conversational AI interactions
+ * using Claude Agent SDK's streaming input mode for persistent Agent sessions
+ * per chatId.
  */
 
 export { Pilot, type PilotCallbacks, type PilotOptions } from './pilot.js';
