@@ -70,6 +70,7 @@ async function executeOnce(
 
   // Create Pilot instance
   const pilot = new Pilot({
+    isCliMode: true,
     callbacks: {
       sendMessage: async (msg: string) => {
         adapter.write(msg);
@@ -85,10 +86,10 @@ async function executeOnce(
   });
 
   try {
-    // Process message through Pilot
-    await pilot.processMessage(chatId, prompt, messageId);
+    // Process message through Pilot (CLI mode: waits for completion)
+    await pilot.executeOnce(chatId, prompt, messageId);
 
-    // Wait for output to complete
+    // Finalize output adapter if needed
     if ('finalize' in adapter) {
       (adapter as any).finalize();
     }
@@ -97,6 +98,10 @@ async function executeOnce(
     }
 
     logger.info('CLI execution complete');
+
+    // Explicitly exit - MCP servers and other resources may keep process alive
+    // OS will clean up resources
+    process.exit(0);
   } catch (error) {
     const enriched = handleError(error, {
       category: ErrorCategory.SDK,

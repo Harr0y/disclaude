@@ -188,6 +188,15 @@ export class Config {
   }
 
   /**
+   * Get MCP servers configuration from config file.
+   *
+   * @returns MCP servers configuration or undefined
+   */
+  static getMcpServersConfig(): Record<string, import('./types.js').McpServerConfig> | undefined {
+    return fileConfigOnly.tools?.mcpServers;
+  }
+
+  /**
    * Get the task execution timeout in milliseconds.
    *
    * @returns Timeout in milliseconds (default: 300000 = 5 minutes)

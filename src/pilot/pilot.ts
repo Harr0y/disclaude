@@ -73,6 +73,12 @@ export interface PilotOptions {
    * Default: 30 minutes
    */
   sessionIdleTimeout?: number;
+
+  /**
+   * Whether running in CLI mode (vs Feishu bot mode).
+   * CLI mode doesn't need Feishu MCP servers.
+   */
+  isCliMode?: boolean;
 }
 
 /**
@@ -114,6 +120,7 @@ interface PerChatIdState {
 export class Pilot {
   private readonly callbacks: PilotCallbacks;
   private readonly logger = createLogger('Pilot');
+  private readonly isCliMode: boolean;
 
   // Per-chatId Agent states
   private states = new Map<string, PerChatIdState>();
@@ -126,10 +133,152 @@ export class Pilot {
 
   constructor(options: PilotOptions) {
     this.callbacks = options.callbacks;
+    this.isCliMode = options.isCliMode ?? false;
     this.sessionIdleTimeout = options.sessionIdleTimeout ?? 30 * 60 * 1000; // 30 minutes
 
-    // Start periodic cleanup
-    this.startCleanupTimer();
+    // Start periodic cleanup only for service mode
+    // CLI mode doesn't need cleanup since executeOnce() doesn't use state
+    if (!this.isCliMode) {
+      this.startCleanupTimer();
+    }
+  }
+
+  /**
+   * Execute a one-shot query (CLI mode).
+   *
+   * This method is blocking - it waits for the query to complete before returning.
+   * Uses direct string prompt instead of streaming input generator.
+   * No session state is maintained - each call is independent.
+   *
+   * @param chatId - Platform-specific chat identifier
+   * @param text - User's message text
+   * @param messageId - Unique message identifier
+   * @param senderOpenId - Optional sender's open_id for @ mentions
+   */
+  async executeOnce(
+    chatId: string,
+    text: string,
+    messageId: string,
+    senderOpenId?: string
+  ): Promise<void> {
+    this.logger.info({ chatId, messageId, textLength: text.length }, 'CLI mode: executing one-shot query');
+
+    const { query } = await import('@anthropic-ai/claude-agent-sdk');
+    const { createAgentSdkOptions } = await import('../utils/sdk.js');
+    const agentConfig = Config.getAgentConfig();
+
+    const sdkOptions = createAgentSdkOptions({
+      apiKey: agentConfig.apiKey,
+      model: agentConfig.model,
+      apiBaseUrl: agentConfig.apiBaseUrl,
+      permissionMode: 'default', // CLI mode asks user for permissions
+      disallowedTools: ['AskUserQuestion'],
+    });
+
+    // Add MCP servers for task tools
+    const mcpServers: Record<string, unknown> = {
+      'task-skill': taskSkillSdkMcpServer,
+    };
+
+    // CLI mode doesn't need Feishu MCP server
+    // Merge configured external MCP servers from config file
+    const configuredMcpServers = Config.getMcpServersConfig();
+    if (configuredMcpServers) {
+      for (const [name, config] of Object.entries(configuredMcpServers)) {
+        mcpServers[name] = {
+          type: 'stdio',
+          command: config.command,
+          args: config.args || [],
+          ...(config.env && { env: config.env }),
+        };
+      }
+    }
+
+    (sdkOptions as Record<string, unknown>).mcpServers = mcpServers;
+
+    // Build enhanced content with context
+    const enhancedContent = this.buildEnhancedContent(chatId, {
+      text,
+      messageId,
+      senderOpenId,
+    });
+
+    this.logger.info({ chatId, mcpServers: Object.keys(sdkOptions.mcpServers || {}) }, 'Starting CLI query with direct prompt');
+
+    // Track pending Write tool files for this execution
+    const pendingWriteFiles = new Set<string>();
+
+    try {
+      // Create query with direct string prompt (not generator)
+      const queryInstance = query({
+        prompt: enhancedContent,
+        options: sdkOptions,
+      });
+
+      // Process SDK messages synchronously
+      for await (const message of queryInstance) {
+        // Parse and process the message
+        const parsed = parseSDKMessage(message);
+
+        // Check for completion - result type means query is done
+        if (parsed.type === 'result') {
+          this.logger.debug({ chatId, content: parsed.content }, 'CLI query result received, breaking loop');
+          break;
+        }
+
+        // Track Write tool operations
+        const isWriteTool =
+          parsed.type === 'tool_use' && parsed.metadata?.toolName === 'Write';
+
+        if (isWriteTool && parsed.metadata?.toolInputRaw) {
+          const toolInput = parsed.metadata.toolInputRaw as Record<string, unknown>;
+          const filePath =
+            (toolInput.file_path || toolInput.filePath) as string | undefined;
+
+          if (filePath) {
+            pendingWriteFiles.add(filePath);
+            this.logger.debug({ filePath, chatId }, 'Write tool detected');
+          }
+        }
+
+        // Send file when Write tool completes
+        if (parsed.type === 'tool_result' && pendingWriteFiles.size > 0) {
+          const filePaths = Array.from(pendingWriteFiles);
+          pendingWriteFiles.clear();
+          this.logger.debug(
+            { fileCount: filePaths.length, chatId },
+            'Write tool completed'
+          );
+
+          for (const filePath of filePaths) {
+            try {
+              await this.callbacks.sendFile(chatId, filePath);
+              this.logger.info({ filePath, chatId }, 'File sent');
+            } catch (error) {
+              const err = error as Error;
+              this.logger.error({ err, filePath, chatId }, 'Failed to send file');
+              await this.callbacks.sendMessage(
+                chatId,
+                `❌ Failed to send file: ${filePath}`
+              );
+            }
+          }
+        }
+
+        // Send message content to callback
+        if (parsed.content) {
+          await this.callbacks.sendMessage(chatId, parsed.content);
+        }
+      }
+
+      this.logger.info({ chatId }, 'CLI query completed normally');
+    } catch (error) {
+      const err = error as Error;
+      this.logger.error({ err, chatId }, 'CLI query error');
+
+      await this.callbacks.sendMessage(chatId, `❌ Session error: ${err.message}`);
+      throw err;
+    }
   }
 
   /**
@@ -326,12 +475,33 @@ ${msg.text}`;
     });
 
     // Add MCP servers for task tools
-    (sdkOptions as Record<string, unknown>).mcpServers = {
-      'feishu-context': feishuSdkMcpServer,
+    // Start with internal SDK MCP servers
+    const mcpServers: Record<string, unknown> = {
       'task-skill': taskSkillSdkMcpServer,
     };
 
-    this.logger.info({ chatId }, 'Starting SDK query with streaming input');
+    // Only add Feishu MCP server if NOT in CLI mode
+    // CLI mode doesn't need Feishu integration (no Feishu API calls)
+    if (!this.isCliMode) {
+      mcpServers['feishu-context'] = feishuSdkMcpServer;
+    }
+
+    // Merge configured external MCP servers from config file
+    const configuredMcpServers = Config.getMcpServersConfig();
+    if (configuredMcpServers) {
+      for (const [name, config] of Object.entries(configuredMcpServers)) {
+        mcpServers[name] = {
+          type: 'stdio',
+          command: config.command,
+          args: config.args || [],
+          ...(config.env && { env: config.env }),
+        };
+      }
+    }
+
+    (sdkOptions as Record<string, unknown>).mcpServers = mcpServers;
+
+    this.logger.info({ chatId, mcpServers: Object.keys(sdkOptions.mcpServers || {}) }, 'Starting SDK query with streaming input');
 
     try {
       // Create query with streaming input generator
