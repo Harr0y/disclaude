@@ -6,7 +6,7 @@ import { Config } from '../config/index.js';
 import { CLIOutputAdapter } from '../utils/output-adapter.js';
 import { createLogger } from '../utils/logger.js';
 import { handleError, ErrorCategory } from '../utils/error-handler.js';
-import { Pilot } from '../pilot/index.js';
+import { Pilot } from '../agents/pilot.js';
 
 const logger = createLogger('CLI');
 

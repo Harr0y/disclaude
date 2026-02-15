@@ -36,12 +36,6 @@ describe('CLI Entry Point', () => {
       expect(importPath).toContain('error-handler');
     });
 
-    it('should import environment loader', () => {
-      // Import from utils/env-loader
-      const importPath = './utils/env-loader.js';
-      expect(importPath).toContain('env-loader');
-    });
-
     it('should import package.json', () => {
       // Package import
       const importPath = '../package.json';
@@ -106,12 +100,6 @@ describe('CLI Entry Point', () => {
       // Error handling for env loading
       const errorHandling = 'Failed to load environment scripts';
       expect(errorHandling).toContain('Failed');
-    });
-
-    it('should log environment variables loaded', () => {
-      // Logging for env variables
-      const logField = 'varsLoaded';
-      expect(logField).toBe('varsLoaded');
     });
   });
 

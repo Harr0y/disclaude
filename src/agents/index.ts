@@ -6,4 +6,4 @@
  * per chatId.
  */
 
-export { Pilot, type PilotCallbacks, type PilotOptions } from './pilot.js';
+export { Pilot, type PilotCallbacks, type PilotConfig } from './pilot.js';

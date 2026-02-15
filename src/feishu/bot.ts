@@ -10,7 +10,7 @@ import { createLogger } from '../utils/logger.js';
 import { attachmentManager } from './attachment-manager.js';
 import { downloadFile } from './file-downloader.js';
 import { messageLogger } from './message-logger.js';
-import { Pilot } from '../pilot/index.js';
+import { Pilot } from '../agents/pilot.js';
 import { FileHandler } from './file-handler.js';
 import { MessageSender } from './message-sender.js';
 import { TaskFlowOrchestrator } from './task-flow-orchestrator.js';

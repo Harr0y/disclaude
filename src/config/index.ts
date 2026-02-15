@@ -223,4 +223,14 @@ export class Config {
       rotate: this.LOG_ROTATE,
     };
   }
+
+  /**
+   * Get global environment variables from config file.
+   * These will be passed to all agent processes.
+   *
+   * @returns Global environment variables object
+   */
+  static getGlobalEnv(): Record<string, string> {
+    return fileConfigOnly.env || {};
+  }
 }

@@ -79,6 +79,7 @@ export function createAgentSdkOptions(params: CreateAgentSdkOptionsParams): Reco
   sdkOptions.env = {
     ANTHROPIC_API_KEY: apiKey,
     PATH: newPath,
+    ...Config.getGlobalEnv(),
   };
 
   // Set model

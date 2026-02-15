@@ -19,8 +19,6 @@ const logger = createLogger('ConfigLoader');
 const CONFIG_FILE_NAMES = [
   'disclaude.config.yaml',
   'disclaude.config.yml',
-  '.disclauderc.yaml',
-  '.disclauderc.yml',
 ] as const;
 
 /**

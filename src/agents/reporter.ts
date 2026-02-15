@@ -130,7 +130,7 @@ export class Reporter {
     };
 
     // Set environment
-    sdkOptions.env = buildSdkEnv(this.apiKey, this.apiBaseUrl);
+    sdkOptions.env = buildSdkEnv(this.apiKey, this.apiBaseUrl, Config.getGlobalEnv());
 
     // Set model
     if (this.model) {

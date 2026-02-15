@@ -30,7 +30,7 @@ import { createLogger } from '../utils/logger.js';
 import { Config } from '../config/index.js';
 import { feishuSdkMcpServer } from '../mcp/feishu-context-mcp.js';
 import { taskSkillSdkMcpServer } from '../mcp/task-skill-mcp.js';
-import { parseSDKMessage } from '../utils/sdk.js';
+import { parseSDKMessage, buildSdkEnv } from '../utils/sdk.js';
 
 /**
  * Callback functions for platform-specific operations.
@@ -61,19 +61,26 @@ export interface PilotCallbacks {
 
 /**
  * Configuration options for Pilot.
+ * Follows same pattern as EvaluatorConfig and ReporterConfig.
  */
-export interface PilotOptions {
+export interface PilotConfig {
+  /** API key (if not provided, uses Config.getAgentConfig()) */
+  apiKey?: string;
+  /** Model identifier (if not provided, uses Config.getAgentConfig()) */
+  model?: string;
+  /** API base URL (if not provided, uses Config.getAgentConfig()) */
+  apiBaseUrl?: string;
+  /** Permission mode (default: 'bypassPermissions' for bot mode) */
+  permissionMode?: 'default' | 'bypassPermissions';
   /**
    * Callback functions for platform-specific operations.
    */
   callbacks: PilotCallbacks;
-
   /**
    * Maximum idle time before a session is cleaned up (ms).
    * Default: 30 minutes
    */
   sessionIdleTimeout?: number;
-
   /**
    * Whether running in CLI mode (vs Feishu bot mode).
    * CLI mode doesn't need Feishu MCP servers.
@@ -118,9 +125,14 @@ interface PerChatIdState {
  * conversation context across multiple messages.
  */
 export class Pilot {
+  readonly apiKey: string;
+  readonly model: string;
+  readonly apiBaseUrl?: string;
+  readonly permissionMode: 'default' | 'bypassPermissions';
   private readonly callbacks: PilotCallbacks;
   private readonly logger = createLogger('Pilot');
   private readonly isCliMode: boolean;
+  private readonly provider: 'anthropic' | 'glm';
 
   // Per-chatId Agent states
   private states = new Map<string, PerChatIdState>();
@@ -131,10 +143,18 @@ export class Pilot {
   // Cleanup interval timer
   private cleanupTimer?: ReturnType<typeof setInterval>;
 
-  constructor(options: PilotOptions) {
-    this.callbacks = options.callbacks;
-    this.isCliMode = options.isCliMode ?? false;
-    this.sessionIdleTimeout = options.sessionIdleTimeout ?? 30 * 60 * 1000; // 30 minutes
+  constructor(config: PilotConfig) {
+    // Get API config from Config if not provided
+    const agentConfig = Config.getAgentConfig();
+    this.apiKey = config.apiKey || agentConfig.apiKey;
+    this.model = config.model || agentConfig.model;
+    this.apiBaseUrl = config.apiBaseUrl || agentConfig.apiBaseUrl;
+    this.permissionMode = config.permissionMode ?? (config.isCliMode ? 'default' : 'bypassPermissions');
+    this.provider = agentConfig.provider;
+
+    this.callbacks = config.callbacks;
+    this.isCliMode = config.isCliMode ?? false;
+    this.sessionIdleTimeout = config.sessionIdleTimeout ?? 30 * 60 * 1000; // 30 minutes
 
     // Start periodic cleanup only for service mode
     // CLI mode doesn't need cleanup since executeOnce() doesn't use state
@@ -164,16 +184,21 @@ export class Pilot {
     this.logger.info({ chatId, messageId, textLength: text.length }, 'CLI mode: executing one-shot query');
 
     const { query } = await import('@anthropic-ai/claude-agent-sdk');
-    const { createAgentSdkOptions } = await import('../utils/sdk.js');
-    const agentConfig = Config.getAgentConfig();
 
-    const sdkOptions = createAgentSdkOptions({
-      apiKey: agentConfig.apiKey,
-      model: agentConfig.model,
-      apiBaseUrl: agentConfig.apiBaseUrl,
-      permissionMode: 'default', // CLI mode asks user for permissions
+    // Build SDK options using instance properties (consistent with Evaluator/Reporter)
+    const sdkOptions: Record<string, unknown> = {
+      cwd: Config.getWorkspaceDir(),
+      permissionMode: this.permissionMode,
       disallowedTools: ['AskUserQuestion'],
-    });
+    };
+
+    // Set environment
+    sdkOptions.env = buildSdkEnv(this.apiKey, this.apiBaseUrl, Config.getGlobalEnv());
+
+    // Set model
+    if (this.model) {
+      sdkOptions.model = this.model;
+    }
 
     // Add MCP servers for task tools
     const mcpServers: Record<string, unknown> = {
@@ -194,7 +219,7 @@ export class Pilot {
       }
     }
 
-    (sdkOptions as Record<string, unknown>).mcpServers = mcpServers;
+    sdkOptions.mcpServers = mcpServers;
 
     // Build enhanced content with context
     const enhancedContent = this.buildEnhancedContent(chatId, {
@@ -463,16 +488,21 @@ ${msg.text}`;
     state.started = true;
 
     const { query } = await import('@anthropic-ai/claude-agent-sdk');
-    const { createAgentSdkOptions } = await import('../utils/sdk.js');
-    const agentConfig = Config.getAgentConfig();
 
-    const sdkOptions = createAgentSdkOptions({
-      apiKey: agentConfig.apiKey,
-      model: agentConfig.model,
-      apiBaseUrl: agentConfig.apiBaseUrl,
-      permissionMode: 'bypassPermissions',
+    // Build SDK options using instance properties (consistent with Evaluator/Reporter)
+    const sdkOptions: Record<string, unknown> = {
+      cwd: Config.getWorkspaceDir(),
+      permissionMode: this.permissionMode,
       disallowedTools: ['AskUserQuestion'],
-    });
+    };
+
+    // Set environment
+    sdkOptions.env = buildSdkEnv(this.apiKey, this.apiBaseUrl, Config.getGlobalEnv());
+
+    // Set model
+    if (this.model) {
+      sdkOptions.model = this.model;
+    }
 
     // Add MCP servers for task tools
     // Start with internal SDK MCP servers
@@ -499,7 +529,7 @@ ${msg.text}`;
       }
     }
 
-    (sdkOptions as Record<string, unknown>).mcpServers = mcpServers;
+    sdkOptions.mcpServers = mcpServers;
 
     this.logger.info({ chatId, mcpServers: Object.keys(sdkOptions.mcpServers || {}) }, 'Starting SDK query with streaming input');
 

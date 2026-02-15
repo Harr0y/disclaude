@@ -228,7 +228,7 @@ describe('CLI Module', () => {
   describe('Dependencies', () => {
     it('should import Pilot from pilot module', () => {
       // Pilot import
-      const importPath = '../pilot/index.js';
+      const importPath = '../agents/pilot.js';
       expect(importPath).toContain('pilot');
     });
 

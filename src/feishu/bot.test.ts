@@ -20,7 +20,7 @@ import { EventEmitter } from 'events';
 import { FeishuBot } from './bot.js';
 import * as lark from '@larksuiteoapi/node-sdk';
 import { TaskTracker } from '../utils/task-tracker.js';
-import { Pilot } from '../pilot/index.js';
+import { Pilot } from '../agents/pilot.js';
 import { messageHistoryManager } from './message-history.js';
 import { attachmentManager } from './attachment-manager.js';
 import * as fs from 'fs/promises';
@@ -68,7 +68,7 @@ vi.mock('../long-task/index.js', () => ({
   LongTaskManager: vi.fn(),
 }));
 
-vi.mock('../pilot/index.js', () => ({
+vi.mock('../agents/pilot.js', () => ({
   Pilot: vi.fn(),
 }));
 

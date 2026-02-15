@@ -61,35 +61,10 @@ describe('findConfigFile', () => {
     expect(result.path).toContain('disclaude.config.yml');
   });
 
-  it('should find .disclauderc.yaml as fallback', () => {
-    vi.mocked(existsSync).mockImplementation((path) => {
-      const pathStr = String(path);
-      return pathStr.includes('.disclauderc.yaml');
-    });
-
-    const result = findConfigFile();
-
-    expect(result.exists).toBe(true);
-    expect(result.path).toContain('.disclauderc.yaml');
-  });
-
-  it('should find .disclauderc.yml as last resort', () => {
-    vi.mocked(existsSync).mockImplementation((path) => {
-      const pathStr = String(path);
-      return pathStr.includes('.disclauderc.yml');
-    });
-
-    const result = findConfigFile();
-
-    expect(result.exists).toBe(true);
-    expect(result.path).toContain('.disclauderc.yml');
-  });
-
   it('should prioritize files in correct order', () => {
     vi.mocked(existsSync).mockImplementation((path) => {
       const pathStr = String(path);
-      // Both files exist, but .disclauderc.yaml should be found first
-      return pathStr.includes('disclaude.config.yaml') || pathStr.includes('.disclauderc.yaml');
+      return pathStr.includes('disclaude.config.yaml') || pathStr.includes('disclaude.config.yml');
     });
 
     const result = findConfigFile();

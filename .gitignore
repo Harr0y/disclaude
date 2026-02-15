@@ -44,6 +44,7 @@ Thumbs.db
 
 # Playwright MCP
 .playwright-mcp/
+.mcp.json
 
 # Task records
 tasks/

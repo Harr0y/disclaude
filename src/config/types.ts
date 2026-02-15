@@ -120,6 +120,8 @@ export interface DisclaudeConfig {
   logging?: LoggingConfig;
   /** Tool configuration */
   tools?: ToolsConfig;
+  /** Global environment variables applied to all agent processes */
+  env?: Record<string, string>;
 }
 
 /**

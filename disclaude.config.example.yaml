@@ -118,6 +118,18 @@ tools:
     #   env:
     #     CUSTOM_VAR: "value"
 
+# -----------------------------------------------------------------------------
+# Global Environment Variables
+# -----------------------------------------------------------------------------
+# Environment variables defined here will be passed to all agent processes.
+# Useful for API keys, feature flags, or other configuration.
+env:
+  # Example: Custom API key
+  # CUSTOM_API_KEY: "your_key_here"
+
+  # Example: Enable debug mode
+  # DEBUG: "false"
+
 # =============================================================================
 # Notes
 # =============================================================================
