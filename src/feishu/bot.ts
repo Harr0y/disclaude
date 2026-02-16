@@ -3,6 +3,8 @@
  */
 import * as lark from '@larksuiteoapi/node-sdk';
 import { EventEmitter } from 'events';
+import { exec } from 'node:child_process';
+import { promisify } from 'node:util';
 import { Config } from '../config/index.js';
 import { DEDUPLICATION } from '../config/constants.js';
 import { TaskTracker } from '../utils/task-tracker.js';
@@ -15,6 +17,8 @@ import { FileHandler } from './file-handler.js';
 import { MessageSender } from './message-sender.js';
 import { TaskFlowOrchestrator } from './task-flow-orchestrator.js';
 import { setTaskFlowOrchestrator } from '../mcp/task-skill-mcp.js';
+
+const execAsync = promisify(exec);
 
 /**
  * Feishu/Lark bot using WebSocket.
@@ -426,6 +430,22 @@ ${uploadPrompt}`;
         chat_id,
         '✅ **对话已重置**\n\n新的会话已启动，之前的上下文已清除。'
       );
+      return;
+    }
+
+    // Check for /restart command
+    if (text.trim() === '/restart') {
+      this.logger.info({ chatId: chat_id }, 'Restart command triggered');
+      await this.sendMessage(
+        chat_id,
+        '🔄 **正在重启服务...**\n\nPM2 服务即将重启，请稍候。'
+      );
+      try {
+        await execAsync('pm2 restart disclaude-feishu');
+        this.logger.info('PM2 service restarted successfully');
+      } catch (error) {
+        this.logger.error({ err: error }, 'Failed to restart PM2 service');
+      }
       return;
     }
 

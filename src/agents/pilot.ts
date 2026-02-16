@@ -132,7 +132,6 @@ export class Pilot {
   private readonly callbacks: PilotCallbacks;
   private readonly logger = createLogger('Pilot');
   private readonly isCliMode: boolean;
-  private readonly provider: 'anthropic' | 'glm';
 
   // Per-chatId Agent states
   private states = new Map<string, PerChatIdState>();
@@ -150,7 +149,6 @@ export class Pilot {
     this.model = config.model || agentConfig.model;
     this.apiBaseUrl = config.apiBaseUrl || agentConfig.apiBaseUrl;
     this.permissionMode = config.permissionMode ?? (config.isCliMode ? 'default' : 'bypassPermissions');
-    this.provider = agentConfig.provider;
 
     this.callbacks = config.callbacks;
     this.isCliMode = config.isCliMode ?? false;
@@ -190,6 +188,7 @@ export class Pilot {
       cwd: Config.getWorkspaceDir(),
       permissionMode: this.permissionMode,
       disallowedTools: ['AskUserQuestion'],
+      settingSources: ['project'],
     };
 
     // Set environment
@@ -494,6 +493,7 @@ ${msg.text}`;
       cwd: Config.getWorkspaceDir(),
       permissionMode: this.permissionMode,
       disallowedTools: ['AskUserQuestion'],
+      settingSources: ['project'],
     };
 
     // Set environment

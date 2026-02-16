@@ -3,7 +3,7 @@
  * Executes a single prompt from command line arguments and exits.
  */
 import { Config } from '../config/index.js';
-import { CLIOutputAdapter } from '../utils/output-adapter.js';
+import { CLIOutputAdapter, OutputAdapter } from '../utils/output-adapter.js';
 import { createLogger } from '../utils/logger.js';
 import { handleError, ErrorCategory } from '../utils/error-handler.js';
 import { Pilot } from '../agents/pilot.js';
@@ -46,19 +46,23 @@ async function executeOnce(
   const chatId = feishuChatId || 'cli-console';
 
   // Create output adapter
-  let adapter: CLIOutputAdapter;
+  let adapter: OutputAdapter;
 
   if (feishuChatId) {
     // Feishu mode: Use FeishuOutputAdapter
     const { FeishuOutputAdapter } = await import('../utils/output-adapter.js');
     const { createFeishuSender, createFeishuCardSender } = await import('../feishu/sender.js');
 
+    // Create sender functions (they return async functions)
+    const sendMessageFn = createFeishuSender();
+    const sendCardFn = createFeishuCardSender();
+
     adapter = new FeishuOutputAdapter({
-      sendMessage: async (msg: string) => {
-        await createFeishuSender(feishuChatId, msg);
+      sendMessage: async (chatId: string, msg: string) => {
+        await sendMessageFn(chatId, msg);
       },
-      sendCard: async (card: Record<string, unknown>) => {
-        await createFeishuCardSender(feishuChatId, card);
+      sendCard: async (chatId: string, card: Record<string, unknown>) => {
+        await sendCardFn(chatId, card);
       },
       chatId: feishuChatId,
       throttleIntervalMs: 2000,
@@ -72,14 +76,14 @@ async function executeOnce(
   const pilot = new Pilot({
     isCliMode: true,
     callbacks: {
-      sendMessage: async (msg: string) => {
+      sendMessage: async (_chatId: string, msg: string) => {
         adapter.write(msg);
       },
-      sendCard: async (card: Record<string, unknown>) => {
+      sendCard: async (_chatId: string, card: Record<string, unknown>) => {
         const cardJson = JSON.stringify(card, null, 2);
         adapter.write(cardJson);
       },
-      sendFile: async (filePath: string) => {
+      sendFile: async (_chatId: string, filePath: string) => {
         adapter.write(`\n📎 File created: ${filePath}\n`);
       },
     },
